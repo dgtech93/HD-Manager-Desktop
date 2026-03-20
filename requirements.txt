@@ -1,0 +1,7 @@
+PyQt6
+keyring
+
+# Dev / quality
+ruff
+black
+pytest
