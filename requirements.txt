@@ -1,5 +1,6 @@
 PyQt6
 keyring
+openpyxl
 
 # Dev / quality
 ruff

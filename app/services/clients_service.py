@@ -45,6 +45,30 @@ class ClientsService:
     def list_tags_for_client(self, client_id: int) -> list[dict]:
         return self.repo.list_tags_for_client(client_id)
 
+    def list_client_notes(self, client_id: int) -> list[dict]:
+        return self.repo.list_client_notes(client_id)
+
+    def save_client_note(
+        self,
+        note_id: int | None,
+        client_id: int,
+        title: str,
+        content_type: str,
+        content: str,
+    ) -> int:
+        return self.repo.save_client_note(
+            note_id, client_id, title, content_type, content
+        )
+
+    def delete_client_note(self, note_id: int) -> None:
+        self.repo.delete_client_note(note_id)
+
+    def get_client_note(self, note_id: int) -> dict | None:
+        return self.repo.get_client_note(note_id)
+
+    def get_or_create_tag_for_client(self, client_id: int, client_name: str) -> int:
+        return self.repo.get_or_create_tag_for_client(client_id, client_name)
+
     # lookups
     def list_roles_lookup(self) -> list[dict]:
         return self.repo.list_roles_lookup()

@@ -13,13 +13,18 @@ _SUBPROCESS_FLAGS = (
     subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 )
 
-from PyQt6.QtCore import Qt, QUrl, QDate, QEvent, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QUrl, QDate, QEvent, QThread, pyqtSignal, QMimeData
 from PyQt6.QtGui import QDesktopServices, QGuiApplication, QKeySequence, QColor, QPalette
 from PyQt6.QtWidgets import (
+    QAbstractItemView,
     QCheckBox,
     QComboBox,
+    QDialogButtonBox,
+    QDoubleSpinBox,
+    QLineEdit,
     QDateEdit,
     QDialog,
+    QFileDialog,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -29,13 +34,16 @@ from PyQt6.QtWidgets import (
     QListWidgetItem,
     QMenu,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QScrollArea,
     QSplitter,
     QSpinBox,
+    QStackedWidget,
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
+    QTableWidgetSelectionRange,
     QToolButton,
     QTreeWidget,
     QTreeWidgetItem,
@@ -182,6 +190,349 @@ def _build_rdp_launch_file_static(target: str, username: str) -> str:
         return tmp_file.name
 
 
+class _NotesTableCellDelegate(QStyledItemDelegate):
+    """Delegate per la tabella note: frecce a inizio/fine testo spostano alla cella adiacente."""
+
+    def __init__(self, table: QTableWidget, on_edit_start=None) -> None:
+        super().__init__(table)
+        self._table = table
+        self._on_edit_start = on_edit_start
+
+    def createEditor(self, parent, option, index):
+        if callable(self._on_edit_start):
+            self._on_edit_start()
+        editor = QLineEdit(parent)
+        editor.installEventFilter(self)
+        self._editing_index = index
+        return editor
+
+    def eventFilter(self, obj, event):
+        if event.type() != QEvent.Type.KeyPress:
+            return super().eventFilter(obj, event)
+        editor = obj
+        if not isinstance(editor, QLineEdit):
+            return super().eventFilter(obj, event)
+        text = editor.text()
+        pos = editor.cursorPosition()
+        key = event.key()
+        if key == Qt.Key.Key_Right and pos == len(text):
+            self.commitData.emit(editor)
+            self.closeEditor.emit(editor, QStyledItemDelegate.EndEditHint.EditNextItem)
+            return True
+        if key == Qt.Key.Key_Left and pos == 0:
+            self.commitData.emit(editor)
+            self.closeEditor.emit(editor, QStyledItemDelegate.EndEditHint.EditPreviousItem)
+            return True
+        return super().eventFilter(obj, event)
+
+
+def _notes_letter_to_col(s: str) -> int:
+    """A->0, B->1, ..., Z->25, AA->26, ..."""
+    result = 0
+    for c in s.upper():
+        if "A" <= c <= "Z":
+            result = result * 26 + (ord(c) - ord("A") + 1)
+    return result - 1 if result else 0
+
+
+def _notes_parse_cell_ref(ref: str) -> tuple[int, int] | None:
+    """Parse 'A1' -> (0, 0), 'B2' -> (1, 1). Returns (row, col) or None."""
+    ref = ref.strip().upper()
+    if not ref:
+        return None
+    i = 0
+    while i < len(ref) and ref[i].isalpha():
+        i += 1
+    if i == 0 or i >= len(ref):
+        return None
+    letters, digits = ref[:i], ref[i:]
+    try:
+        row = int(digits) - 1
+    except ValueError:
+        return None
+    col = _notes_letter_to_col(letters)
+    return (row, col)
+
+
+def _notes_parse_range(ref: str, table_rows: int, table_cols: int) -> list[tuple[int, int]]:
+    """Parse 'A1:B3' or 'A1,B2,C3' into list of (row,col)."""
+    cells: list[tuple[int, int]] = []
+    ref = ref.strip()
+    if ":" in ref:
+        parts = ref.split(":", 1)
+        tl = _notes_parse_cell_ref(parts[0].strip())
+        br = _notes_parse_cell_ref(parts[1].strip())
+        if tl is None or br is None:
+            return []
+        r1, c1 = tl
+        r2, c2 = br
+        for r in range(min(r1, r2), max(r1, r2) + 1):
+            for c in range(min(c1, c2), max(c1, c2) + 1):
+                if 0 <= r < table_rows and 0 <= c < table_cols:
+                    cells.append((r, c))
+    else:
+        for part in ref.split(","):
+            cell = _notes_parse_cell_ref(part.strip())
+            if cell and 0 <= cell[0] < table_rows and 0 <= cell[1] < table_cols:
+                cells.append(cell)
+    return cells
+
+
+class _NotesFormulasDialog(QDialog):
+    OPERATIONS = [
+        ("Somma", "sum"),
+        ("Sottrazione", "sub"),
+        ("Moltiplicazione", "mul"),
+        ("Divisione", "div"),
+        ("Percentuale (A % di B)", "pct"),
+        ("Radice quadrata", "sqrt"),
+        ("Radice cubica", "cbrt"),
+        ("Radice n-esima", "nroot"),
+        ("Concatenazione righe", "concat_row"),
+        ("Concatenazione colonne", "concat_col"),
+        ("Media", "avg"),
+    ]
+
+    def __init__(self, table: QTableWidget, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Formule")
+        self.resize(420, 380)
+        self._table = table
+        layout = QVBoxLayout(self)
+
+        layout.addWidget(QLabel("Operazione:"))
+        self.op_combo = QComboBox()
+        for label, _key in self.OPERATIONS:
+            self.op_combo.addItem(label)
+        self.op_combo.currentIndexChanged.connect(self._on_op_changed)
+        layout.addWidget(self.op_combo)
+
+        src_h = QHBoxLayout()
+        src_h.addWidget(QLabel("Celle sorgente:"))
+        self.src_edit = QLineEdit()
+        self.src_edit.setPlaceholderText("es. A1:B3 (intervallo) o A1,B2,C3 (celle sparse)")
+        src_h.addWidget(self.src_edit, 1)
+        use_sel_btn = QPushButton("Usa selezione")
+        use_sel_btn.clicked.connect(self._fill_from_selection)
+        src_h.addWidget(use_sel_btn)
+        layout.addLayout(src_h)
+
+        self.n_root_row = QHBoxLayout()
+        self.n_root_row.addWidget(QLabel("n (per radice n-esima):"))
+        self.n_spin = QSpinBox()
+        self.n_spin.setMinimum(2)
+        self.n_spin.setMaximum(100)
+        self.n_spin.setValue(2)
+        self.n_root_row.addWidget(self.n_spin)
+        self.n_root_row.addStretch()
+        self._n_root_widget = QWidget()
+        self._n_root_widget.setLayout(self.n_root_row)
+        layout.addWidget(self._n_root_widget)
+        self._n_root_widget.setVisible(False)
+
+        self.sep_row = QHBoxLayout()
+        self.sep_row.addWidget(QLabel("Separatore:"))
+        self.sep_edit = QLineEdit()
+        self.sep_edit.setPlaceholderText("es. spazio, virgola, |")
+        self.sep_edit.setMaxLength(5)
+        self.sep_row.addWidget(self.sep_edit, 1)
+        self._sep_widget = QWidget()
+        self._sep_widget.setLayout(self.sep_row)
+        layout.addWidget(self._sep_widget)
+        self._sep_widget.setVisible(False)
+
+        res_h = QHBoxLayout()
+        res_h.addWidget(QLabel("Cella risultato:"))
+        self.res_edit = QLineEdit()
+        self.res_edit.setPlaceholderText("es. C1")
+        res_h.addWidget(self.res_edit, 1)
+        layout.addLayout(res_h)
+
+        self.apply_all_cb = QCheckBox("Applica a tutte le righe (come in Excel)")
+        layout.addWidget(self.apply_all_cb)
+
+        layout.addStretch()
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self._on_op_changed(0)
+        self._fill_from_selection()
+
+    def _on_op_changed(self, index: int) -> None:
+        _, key = self.OPERATIONS[index]
+        self._n_root_widget.setVisible(key == "nroot")
+        self._sep_widget.setVisible(key in ("concat_row", "concat_col"))
+
+    def _fill_from_selection(self) -> None:
+        """Riempie le celle sorgente dalla selezione (supporta celle non contigue)."""
+        ranges = self._table.selectedRanges()
+        if not ranges:
+            return
+        parts: list[str] = []
+        for rng in ranges:
+            for r in range(rng.topRow(), rng.bottomRow() + 1):
+                for c in range(rng.leftColumn(), rng.rightColumn() + 1):
+                    parts.append(f"{_notes_col_index_to_letter(c)}{r + 1}")
+        if not parts:
+            return
+        if len(parts) == 1:
+            self.src_edit.setText(parts[0])
+        elif len(ranges) == 1 and (ranges[0].rowCount() > 1 or ranges[0].columnCount() > 1):
+            rng = ranges[0]
+            self.src_edit.setText(
+                f"{_notes_col_index_to_letter(rng.leftColumn())}{rng.topRow() + 1}:"
+                f"{_notes_col_index_to_letter(rng.rightColumn())}{rng.bottomRow() + 1}"
+            )
+        else:
+            self.src_edit.setText(",".join(parts))
+        if not self.res_edit.text().strip():
+            rng = ranges[0]
+            res_col = min(rng.rightColumn() + 1, self._table.columnCount() - 1)
+            self.res_edit.setText(f"{_notes_col_index_to_letter(res_col)}{rng.topRow() + 1}")
+
+    def _get_op_key(self) -> str:
+        return self.OPERATIONS[self.op_combo.currentIndex()][1]
+
+    def _get_src_cells(self) -> list[tuple[int, int]]:
+        return _notes_parse_range(
+            self.src_edit.text(), self._table.rowCount(), self._table.columnCount()
+        )
+
+    def _get_res_cell(self) -> tuple[int, int] | None:
+        return _notes_parse_cell_ref(self.res_edit.text().strip())
+
+    def _get_cell_value(self, r: int, c: int) -> str:
+        item = self._table.item(r, c)
+        return (item.text() or "").strip()
+
+    def _get_cell_numbers(self, cells: list[tuple[int, int]]) -> list[float]:
+        vals: list[float] = []
+        for r, c in cells:
+            txt = self._get_cell_value(r, c)
+            if txt:
+                try:
+                    vals.append(float(txt.replace(",", ".")))
+                except ValueError:
+                    pass
+        return vals
+
+    def _set_result(self, row: int, col: int, value: str) -> None:
+        if row >= self._table.rowCount() or col >= self._table.columnCount():
+            return
+        item = self._table.item(row, col)
+        if item:
+            item.setText(value)
+        else:
+            self._table.setItem(row, col, QTableWidgetItem(value))
+
+    def _compute(self, src_cells: list[tuple[int, int]], res_row: int, res_col: int) -> bool:
+        key = self._get_op_key()
+        nums = self._get_cell_numbers(src_cells)
+        texts = [self._get_cell_value(r, c) for r, c in src_cells]
+
+        import math
+        if key == "sum":
+            if not nums:
+                return False
+            self._set_result(res_row, res_col, str(sum(nums)))
+        elif key == "sub":
+            if len(nums) < 2:
+                return False
+            r = nums[0] - sum(nums[1:])
+            self._set_result(res_row, res_col, str(r))
+        elif key == "mul":
+            if not nums:
+                return False
+            p = 1
+            for n in nums:
+                p *= n
+            self._set_result(res_row, res_col, str(p))
+        elif key == "div":
+            if len(nums) < 2 or nums[1] == 0:
+                return False
+            self._set_result(res_row, res_col, str(nums[0] / nums[1]))
+        elif key == "pct":
+            if len(nums) < 2 or nums[1] == 0:
+                return False
+            self._set_result(res_row, res_col, str(round(100 * nums[0] / nums[1], 2)))
+        elif key == "sqrt":
+            if len(nums) < 1 or nums[0] < 0:
+                return False
+            self._set_result(res_row, res_col, str(round(math.sqrt(nums[0]), 6)))
+        elif key == "cbrt":
+            if len(nums) < 1:
+                return False
+            self._set_result(res_row, res_col, str(round(nums[0] ** (1 / 3), 6)))
+        elif key == "nroot":
+            n = self.n_spin.value()
+            if len(nums) < 1 or n <= 0:
+                return False
+            if nums[0] < 0 and n % 2 == 0:
+                return False
+            self._set_result(res_row, res_col, str(round(nums[0] ** (1 / n), 6)))
+        elif key == "avg":
+            if not nums:
+                return False
+            self._set_result(res_row, res_col, str(round(sum(nums) / len(nums), 6)))
+        elif key == "concat_row":
+            sep = self.sep_edit.text() or " "
+            ordered = sorted(src_cells, key=lambda x: (x[0], x[1]))
+            texts = [self._get_cell_value(r, c) for r, c in ordered]
+            self._set_result(res_row, res_col, sep.join(texts))
+        elif key == "concat_col":
+            sep = self.sep_edit.text() or " "
+            ordered = sorted(src_cells, key=lambda x: (x[1], x[0]))
+            texts = [self._get_cell_value(r, c) for r, c in ordered]
+            self._set_result(res_row, res_col, sep.join(texts))
+        else:
+            return False
+        return True
+
+    def accept(self) -> None:
+        src = self._get_src_cells()
+        res = self._get_res_cell()
+        if not src:
+            QMessageBox.warning(self, "Formule", "Specifica almeno una cella sorgente valida.")
+            return
+        if res is None:
+            QMessageBox.warning(self, "Formule", "Specifica una cella risultato valida (es. C1).")
+            return
+        rows, cols = self._table.rowCount(), self._table.columnCount()
+        if res[0] >= rows or res[1] >= cols:
+            QMessageBox.warning(self, "Formule", "La cella risultato è fuori dai limiti della tabella.")
+            return
+
+        if self.apply_all_cb.isChecked():
+            min_src_c = min(c for _, c in src)
+            max_src_c = max(c for _, c in src)
+            res_r, res_c = res
+            for row in range(rows):
+                src_cells = [(row, c) for c in range(min_src_c, max_src_c + 1)]
+                if not self._compute(src_cells, row, res_c):
+                    pass
+        else:
+            if not self._compute(src, res[0], res[1]):
+                QMessageBox.warning(self, "Formule", "Impossibile calcolare con le celle specificate.")
+                return
+
+        super().accept()
+
+
+def _notes_col_index_to_letter(idx: int) -> str:
+    """0->A, 1->B, ..., 26->AA, ..."""
+    result = ""
+    idx += 1
+    while idx > 0:
+        idx -= 1
+        result = chr(65 + idx % 26) + result
+        idx //= 26
+    return result or "A"
+
+
 class _ClientsTreeDelegate(QStyledItemDelegate):
     def __init__(self, tree: QTreeWidget) -> None:
         super().__init__(tree)
@@ -296,6 +647,7 @@ class ClientsMixin:
         self.client_tabs.addTab(self._build_client_access_tab(), "Accessi")
         self.client_tabs.addTab(self._build_client_archive_tab(), "Archivio Cliente")
         self.client_tabs.addTab(self._build_client_contacts_tab(), "Rubrica")
+        self.client_tabs.addTab(self._build_client_notes_tab(), "Note")
         right_layout.addWidget(self.client_tabs, 1)
         splitter.addWidget(right)
     
@@ -650,6 +1002,688 @@ class ClientsMixin:
         self.contacts_delete_btn.clicked.connect(self._delete_contact)
         return page
 
+    def _build_client_notes_tab(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        title = QLabel("Note Cliente")
+        title.setObjectName("subSectionTitle")
+        layout.addWidget(title)
+
+        main_h = QHBoxLayout()
+        main_h.setSpacing(16)
+
+        btn_column = QVBoxLayout()
+        btn_column.setSpacing(6)
+        btn_column.addWidget(QLabel("Lista note:"))
+        self.notes_list_combo = QComboBox()
+        self.notes_list_combo.setMinimumWidth(180)
+        self.notes_list_combo.currentIndexChanged.connect(self._on_notes_list_selected)
+        btn_column.addWidget(self.notes_list_combo)
+
+        self.notes_save_btn = QPushButton("Salva nella lista")
+        self.notes_save_btn.setObjectName("primaryActionButton")
+        self.notes_save_btn.clicked.connect(self._save_note_to_list)
+        btn_column.addWidget(self.notes_save_btn)
+
+        self.notes_export_btn = QPushButton("Salva in file e archivio")
+        self.notes_export_btn.setObjectName("archiveActionButton")
+        self.notes_export_btn.clicked.connect(self._export_note_to_file_and_archive)
+        btn_column.addWidget(self.notes_export_btn)
+
+        self.notes_add_row_btn = QPushButton("Aggiungi riga")
+        self.notes_add_row_btn.clicked.connect(self._notes_add_row)
+        btn_column.addWidget(self.notes_add_row_btn)
+
+        self.notes_clear_btn = QPushButton("Pulisci foglio")
+        self.notes_clear_btn.clicked.connect(self._notes_clear_sheet)
+        btn_column.addWidget(self.notes_clear_btn)
+
+        self.notes_formulas_btn = QPushButton("Formule")
+        self.notes_formulas_btn.clicked.connect(self._open_notes_formulas_dialog)
+        btn_column.addWidget(self.notes_formulas_btn)
+
+        self.notes_undo_btn = QPushButton("Annulla (Ctrl+Z)")
+        self.notes_undo_btn.clicked.connect(self._notes_undo)
+        self.notes_undo_btn.setEnabled(False)
+        btn_column.addWidget(self.notes_undo_btn)
+        self.notes_redo_btn = QPushButton("Ripristina (Ctrl+Y)")
+        self.notes_redo_btn.clicked.connect(self._notes_redo)
+        self.notes_redo_btn.setEnabled(False)
+        btn_column.addWidget(self.notes_redo_btn)
+
+        self.notes_new_btn = QPushButton("Nuova nota")
+        self.notes_new_btn.clicked.connect(self._new_note)
+        btn_column.addWidget(self.notes_new_btn)
+
+        self.notes_delete_btn = QPushButton("Elimina")
+        self.notes_delete_btn.setObjectName("dangerActionButton")
+        self.notes_delete_btn.clicked.connect(self._delete_selected_note)
+        btn_column.addWidget(self.notes_delete_btn)
+
+        btn_column.addStretch()
+        btn_widget = QWidget()
+        btn_widget.setMaximumWidth(220)
+        btn_widget.setLayout(btn_column)
+        main_h.addWidget(btn_widget)
+
+        content_column = QVBoxLayout()
+        content_column.setSpacing(6)
+        self.notes_title_edit = QLineEdit()
+        self.notes_title_edit.setPlaceholderText("Titolo nota...")
+        content_column.addWidget(self.notes_title_edit)
+
+        self.notes_tabs = QTabWidget()
+        self.notes_text_edit = QPlainTextEdit()
+        self.notes_text_edit.setPlaceholderText("Scrivi qui il testo della nota...")
+        self.notes_tabs.addTab(self.notes_text_edit, "Testo")
+
+        self.notes_table = QTableWidget(0, 4)
+        self._notes_undo_stack: list[str] = []
+        self._notes_redo_stack: list[str] = []
+        self._notes_restoring = False
+        self._notes_max_undo = 50
+        self.notes_table.setItemDelegate(_NotesTableCellDelegate(self.notes_table, self._notes_snapshot))
+        self._notes_apply_excel_headers()
+        self.notes_table.setAlternatingRowColors(True)
+        self.notes_table.horizontalHeader().setStretchLastSection(True)
+        self.notes_table.setEditTriggers(
+            QTableWidget.EditTrigger.DoubleClicked
+            | QTableWidget.EditTrigger.AnyKeyPressed
+        )
+        self.notes_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectItems)
+        self.notes_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.notes_table.setTabKeyNavigation(True)
+        self.notes_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.notes_table.customContextMenuRequested.connect(self._on_notes_table_context_menu)
+        self.notes_table.currentCellChanged.connect(self._on_notes_cell_changed)
+        tabella_widget = QWidget()
+        tabella_layout = QVBoxLayout(tabella_widget)
+        tabella_layout.setContentsMargins(0, 0, 0, 0)
+        cell_section = QFrame()
+        cell_section.setObjectName("notesCellPreview")
+        cell_section_layout = QVBoxLayout(cell_section)
+        cell_section_layout.setContentsMargins(0, 0, 0, 8)
+        cell_preview_label = QLabel("Contenuto cella")
+        cell_preview_label.setObjectName("subSectionTitle")
+        cell_section_layout.addWidget(cell_preview_label)
+        self.notes_cell_preview = QPlainTextEdit()
+        self.notes_cell_preview.setPlaceholderText("Seleziona una cella per visualizzare o modificare il contenuto...")
+        self.notes_cell_preview.setMaximumHeight(52)
+        self.notes_cell_preview.setMinimumHeight(40)
+        self.notes_cell_preview.textChanged.connect(self._on_notes_cell_preview_changed)
+        cell_section_layout.addWidget(self.notes_cell_preview)
+        cell_preview_actions = QHBoxLayout()
+        self.notes_cell_clear_btn = QPushButton("Elimina contenuto")
+        self.notes_cell_clear_btn.setObjectName("dangerActionButton")
+        self.notes_cell_clear_btn.clicked.connect(self._notes_clear_selected_cells)
+        cell_preview_actions.addWidget(self.notes_cell_clear_btn)
+        cell_preview_actions.addStretch()
+        cell_section_layout.addLayout(cell_preview_actions)
+        tabella_layout.addWidget(cell_section)
+        tabella_layout.addWidget(self.notes_table, 1)
+        self.notes_tabs.addTab(tabella_widget, "Tabella")
+        self._notes_cell_preview_block = False
+
+        content_column.addWidget(self.notes_tabs, 1)
+        content_widget = QWidget()
+        content_widget.setLayout(content_column)
+        main_h.addWidget(content_widget, 1)
+        layout.addLayout(main_h)
+
+        self.notes_table.installEventFilter(self)
+        self.notes_cell_preview.installEventFilter(self)
+        self._notes_add_row()
+        self._current_note_id: int | None = None
+        return page
+
+    def _notes_apply_excel_headers(self) -> None:
+        cols = self.notes_table.columnCount()
+        self.notes_table.setHorizontalHeaderLabels(
+            [_notes_col_index_to_letter(c) for c in range(cols)]
+        )
+        rows = self.notes_table.rowCount()
+        self.notes_table.verticalHeader().setVisible(True)
+        self.notes_table.setVerticalHeaderLabels([str(r + 1) for r in range(rows)])
+
+    def _notes_get_state(self) -> str:
+        """Serializza lo stato corrente della tabella."""
+        import json
+        rows = []
+        for r in range(self.notes_table.rowCount()):
+            row = []
+            for c in range(self.notes_table.columnCount()):
+                item = self.notes_table.item(r, c)
+                row.append(item.text() if item else "")
+            rows.append(row)
+        return json.dumps(rows, ensure_ascii=False)
+
+    def _notes_set_state(self, state: str) -> None:
+        """Ripristina la tabella dallo stato serializzato."""
+        import json
+        try:
+            rows = json.loads(state)
+        except json.JSONDecodeError:
+            return
+        self._notes_restoring = True
+        self.notes_table.blockSignals(True)
+        try:
+            self.notes_table.setRowCount(len(rows))
+            cols = max((len(r) for r in rows), default=4)
+            self.notes_table.setColumnCount(cols)
+            for r, row in enumerate(rows):
+                for c in range(cols):
+                    val = row[c] if c < len(row) else ""
+                    item = self.notes_table.item(r, c)
+                    if item:
+                        item.setText(val)
+                    else:
+                        self.notes_table.setItem(r, c, QTableWidgetItem(val))
+            self._notes_apply_excel_headers()
+        finally:
+            self.notes_table.blockSignals(False)
+            self._notes_restoring = False
+
+    def _notes_snapshot(self) -> None:
+        """Salva lo stato corrente sullo stack undo (solo per tab Tabella)."""
+        if not hasattr(self, "notes_tabs") or self.notes_tabs.currentIndex() != 1:
+            return
+        if self._notes_restoring:
+            return
+        state = self._notes_get_state()
+        if hasattr(self, "_notes_undo_stack"):
+            self._notes_undo_stack.append(state)
+            if len(self._notes_undo_stack) > self._notes_max_undo:
+                self._notes_undo_stack.pop(0)
+            self._notes_redo_stack.clear()
+            if hasattr(self, "notes_undo_btn"):
+                self.notes_undo_btn.setEnabled(True)
+            if hasattr(self, "notes_redo_btn"):
+                self.notes_redo_btn.setEnabled(False)
+
+    def _notes_undo(self) -> None:
+        """Annulla l'ultima modifica."""
+        if not self._notes_undo_stack or self.notes_tabs.currentIndex() != 1:
+            return
+        state = self._notes_undo_stack.pop()
+        self._notes_redo_stack.append(self._notes_get_state())
+        self._notes_set_state(state)
+        self.notes_redo_btn.setEnabled(True)
+        if not self._notes_undo_stack:
+            self.notes_undo_btn.setEnabled(False)
+
+    def _notes_redo(self) -> None:
+        """Ripeti l'ultima modifica annullata."""
+        if not self._notes_redo_stack or self.notes_tabs.currentIndex() != 1:
+            return
+        state = self._notes_redo_stack.pop()
+        self._notes_undo_stack.append(self._notes_get_state())
+        self._notes_set_state(state)
+        self.notes_undo_btn.setEnabled(True)
+        if not self._notes_redo_stack:
+            self.notes_redo_btn.setEnabled(False)
+
+    def _notes_add_row(self) -> None:
+        r = self.notes_table.rowCount()
+        self.notes_table.insertRow(r)
+        for c in range(self.notes_table.columnCount()):
+            self.notes_table.setItem(r, c, QTableWidgetItem(""))
+        self._notes_apply_excel_headers()
+        self.notes_table.setCurrentCell(r, 0)
+
+    def _on_notes_table_context_menu(self, pos) -> None:
+        menu = QMenu(self)
+        has_selection = bool(self.notes_table.selectedRanges())
+        elimina_righe = menu.addAction("Elimina righe selezionate", self._notes_delete_selected_rows)
+        elimina_colonne = menu.addAction("Elimina colonne selezionate", self._notes_delete_selected_columns)
+        elimina_righe.setEnabled(has_selection)
+        elimina_colonne.setEnabled(has_selection)
+        menu.addAction("Aggiungi colonna", self._notes_add_column)
+        menu.addSeparator()
+        copia_excel = menu.addAction("Copia (per Excel)", lambda: self._copy_notes_to_clipboard("excel"))
+        copia_word = menu.addAction("Copia (per Word)", lambda: self._copy_notes_to_clipboard("word"))
+        copia_excel.setEnabled(has_selection)
+        copia_word.setEnabled(has_selection)
+        menu.addSeparator()
+        has_clipboard = bool(QGuiApplication.clipboard().text().strip())
+        incolla_celle = menu.addAction("Incolla celle (come Excel)", self._paste_notes_table_from_clipboard)
+        incolla_tabella = menu.addAction("Incolla come tabella (come Word)", self._paste_notes_as_table)
+        incolla_celle.setEnabled(has_clipboard)
+        incolla_tabella.setEnabled(has_clipboard)
+        menu.exec(self.notes_table.viewport().mapToGlobal(pos))
+
+    def _notes_delete_selected_rows(self) -> None:
+        """Elimina tutte le righe contenenti celle selezionate (anche non consecutive)."""
+        ranges = self.notes_table.selectedRanges()
+        if not ranges:
+            return
+        rows_to_delete = set()
+        for rng in ranges:
+            for r in range(rng.topRow(), rng.bottomRow() + 1):
+                rows_to_delete.add(r)
+        if not rows_to_delete:
+            return
+        if len(rows_to_delete) >= self.notes_table.rowCount():
+            QMessageBox.information(self, "Note", "Deve rimanere almeno una riga.")
+            return
+        self._notes_snapshot()
+        for r in sorted(rows_to_delete, reverse=True):
+            self.notes_table.removeRow(r)
+        self._notes_apply_excel_headers()
+
+    def _notes_delete_selected_columns(self) -> None:
+        """Elimina tutte le colonne contenenti celle selezionate (anche non consecutive)."""
+        ranges = self.notes_table.selectedRanges()
+        if not ranges:
+            return
+        cols_to_delete = set()
+        for rng in ranges:
+            for c in range(rng.leftColumn(), rng.rightColumn() + 1):
+                cols_to_delete.add(c)
+        if not cols_to_delete:
+            return
+        if len(cols_to_delete) >= self.notes_table.columnCount():
+            QMessageBox.information(self, "Note", "Deve rimanere almeno una colonna.")
+            return
+        self._notes_snapshot()
+        for c in sorted(cols_to_delete, reverse=True):
+            self.notes_table.removeColumn(c)
+        self._notes_apply_excel_headers()
+
+    def _notes_add_column(self) -> None:
+        c = self.notes_table.columnCount()
+        self.notes_table.setColumnCount(c + 1)
+        for r in range(self.notes_table.rowCount()):
+            self.notes_table.setItem(r, c, QTableWidgetItem(""))
+        self._notes_apply_excel_headers()
+
+    def _notes_extend_down(self) -> bool:
+        """Aggiunge una riga in fondo e sposta la selezione lì. Ritorna True se ha aggiunto."""
+        r = self.notes_table.rowCount()
+        if r == 0:
+            self._notes_add_row()
+            return True
+        cr = self.notes_table.currentRow()
+        cc = self.notes_table.currentColumn()
+        if cr == r - 1:
+            self.notes_table.insertRow(r)
+            for c in range(self.notes_table.columnCount()):
+                self.notes_table.setItem(r, c, QTableWidgetItem(""))
+            self._notes_apply_excel_headers()
+            self.notes_table.setCurrentCell(r, min(cc, self.notes_table.columnCount() - 1))
+            return True
+        return False
+
+    def _notes_extend_right(self) -> bool:
+        """Aggiunge una colonna a destra e sposta la selezione lì. Ritorna True se ha aggiunto."""
+        cols = self.notes_table.columnCount()
+        cr = self.notes_table.currentRow()
+        cc = self.notes_table.currentColumn()
+        if cc == cols - 1:
+            self.notes_table.setColumnCount(cols + 1)
+            for r in range(self.notes_table.rowCount()):
+                self.notes_table.setItem(r, cols, QTableWidgetItem(""))
+            self._notes_apply_excel_headers()
+            self.notes_table.setCurrentCell(cr, cols)
+            return True
+        return False
+
+    def _notes_get_data_bounds(self) -> tuple[int, int, int, int]:
+        """Restituisce (min_row, max_row, min_col, max_col) delle celle con contenuto."""
+        min_r = min_c = 0
+        max_r = self.notes_table.rowCount() - 1
+        max_c = self.notes_table.columnCount() - 1
+        if max_r < 0 or max_c < 0:
+            return (0, 0, 0, 0)
+        found_any = False
+        for r in range(max_r + 1):
+            for c in range(max_c + 1):
+                item = self.notes_table.item(r, c)
+                if item and item.text().strip():
+                    if not found_any:
+                        min_r = max_r = r
+                        min_c = max_c = c
+                        found_any = True
+                    else:
+                        min_r = min(min_r, r)
+                        max_r = max(max_r, r)
+                        min_c = min(min_c, c)
+                        max_c = max(max_c, c)
+        if not found_any:
+            return (0, max_r, 0, max_c)
+        return (min_r, max_r, min_c, max_c)
+
+    def _notes_select_to_edge(self, direction: Qt.Key) -> bool:
+        """Ctrl+Shift+frecce: seleziona fino all'ultima cella compilata in quella direzione."""
+        cr = self.notes_table.currentRow()
+        cc = self.notes_table.currentColumn()
+        if cr < 0 or cc < 0:
+            return False
+        min_r, max_r, min_c, max_c = self._notes_get_data_bounds()
+        if direction == Qt.Key.Key_Right:
+            r1, c1, r2, c2 = cr, cc, cr, max_c
+        elif direction == Qt.Key.Key_Down:
+            r1, c1, r2, c2 = cr, cc, max_r, cc
+        elif direction == Qt.Key.Key_Left:
+            r1, c1, r2, c2 = cr, min_c, cr, cc
+        elif direction == Qt.Key.Key_Up:
+            r1, c1, r2, c2 = min_r, cc, cr, cc
+        else:
+            return False
+        rng = QTableWidgetSelectionRange(r1, c1, r2, c2)
+        self.notes_table.clearSelection()
+        self.notes_table.setRangeSelected(rng, True)
+        self.notes_table.setCurrentCell(cr, cc)
+        return True
+
+    def _notes_clear_sheet(self) -> None:
+        """Pulisce il contenuto del tab corrente (Testo o Tabella)."""
+        if self.notes_tabs.currentIndex() == 1:
+            self._notes_snapshot()
+        if self.notes_tabs.currentIndex() == 0:
+            self.notes_text_edit.clear()
+        else:
+            for r in range(self.notes_table.rowCount()):
+                for c in range(self.notes_table.columnCount()):
+                    item = self.notes_table.item(r, c)
+                    if item:
+                        item.setText("")
+
+    def _open_notes_formulas_dialog(self) -> None:
+        """Apre la finestra Formule (solo nel tab Tabella)."""
+        if self.notes_tabs.currentIndex() != 1:
+            self.notes_tabs.setCurrentIndex(1)
+        dlg = _NotesFormulasDialog(self.notes_table, self)
+        dlg.exec()
+
+    def _on_notes_cell_changed(self, row: int, col: int, _prev_row: int, _prev_col: int) -> None:
+        """Aggiorna il riquadro anteprima quando cambia la cella selezionata."""
+        self._notes_cell_preview_block = True
+        try:
+            if row >= 0 and col >= 0:
+                item = self.notes_table.item(row, col)
+                text = item.text() if item else ""
+                self.notes_cell_preview.setPlainText(text)
+            else:
+                self.notes_cell_preview.setPlainText("")
+        finally:
+            self._notes_cell_preview_block = False
+
+    def _on_notes_cell_preview_changed(self) -> None:
+        """Propaga le modifiche dall'anteprima alla cella corrente."""
+        if self._notes_cell_preview_block:
+            return
+        cr, cc = self.notes_table.currentRow(), self.notes_table.currentColumn()
+        if cr < 0 or cc < 0:
+            return
+        text = self.notes_cell_preview.toPlainText()
+        item = self.notes_table.item(cr, cc)
+        if item:
+            item.setText(text)
+        else:
+            self.notes_table.setItem(cr, cc, QTableWidgetItem(text))
+
+    def _notes_clear_selected_cells(self) -> None:
+        """Cancella il contenuto di tutte le celle selezionate."""
+        self._notes_snapshot()
+        for rng in self.notes_table.selectedRanges():
+            for r in range(rng.topRow(), rng.bottomRow() + 1):
+                for c in range(rng.leftColumn(), rng.rightColumn() + 1):
+                    item = self.notes_table.item(r, c)
+                    if item:
+                        item.setText("")
+        cr, cc = self.notes_table.currentRow(), self.notes_table.currentColumn()
+        if cr >= 0 and cc >= 0:
+            self._notes_cell_preview_block = True
+            self.notes_cell_preview.setPlainText("")
+            self._notes_cell_preview_block = False
+
+    def _on_notes_list_selected(self, index: int) -> None:
+        if index < 0:
+            return
+        note_id = self.notes_list_combo.currentData(Qt.ItemDataRole.UserRole)
+        if note_id is None:
+            self._clear_notes_editor()
+            return
+        self._load_note(int(note_id))
+
+    def _clear_notes_editor(self) -> None:
+        self._current_note_id = None
+        self.notes_title_edit.clear()
+        self.notes_text_edit.clear()
+        self.notes_table.setRowCount(0)
+        self.notes_table.setColumnCount(4)
+        self._notes_apply_excel_headers()
+        self._notes_add_row()
+        self.notes_tabs.setCurrentIndex(0)
+        if hasattr(self, "_notes_undo_stack"):
+            self._notes_undo_stack.clear()
+            self._notes_redo_stack.clear()
+            self.notes_undo_btn.setEnabled(False)
+            self.notes_redo_btn.setEnabled(False)
+
+    def _render_client_notes(self, client: dict) -> None:
+        if not hasattr(self, "notes_list_combo"):
+            return
+        self._current_note_id = None
+        self.notes_list_combo.blockSignals(True)
+        self.notes_list_combo.clear()
+        self.notes_list_combo.addItem("-- Nuova nota --", None)
+        client_id = client.get("id")
+        if client_id is None:
+            self.notes_list_combo.blockSignals(False)
+            self._clear_notes_editor()
+            return
+        repo = self.repository.clients if hasattr(self.repository, "clients") else self.repository
+        notes = repo.list_client_notes(int(client_id))
+        for n in notes:
+            title = (n.get("title") or "Senza titolo").strip()
+            created = (n.get("created_at") or "")[:10]
+            label = f"{title} ({created})"
+            self.notes_list_combo.addItem(label, int(n["id"]))
+        self.notes_list_combo.blockSignals(False)
+        self._clear_notes_editor()
+
+    def _load_note(self, note_id: int) -> None:
+        repo = self.repository.clients if hasattr(self.repository, "clients") else self.repository
+        note = repo.get_client_note(note_id)
+        if not note:
+            return
+        self._current_note_id = note_id
+        self.notes_title_edit.setText(note.get("title") or "")
+        ct = note.get("content_type") or "text"
+        content = note.get("content") or ""
+        if ct == "text":
+            self.notes_text_edit.setPlainText(content)
+            self.notes_tabs.setCurrentIndex(0)
+        else:
+            try:
+                import json
+                rows = json.loads(content) if content else []
+                self.notes_table.setRowCount(len(rows))
+                cols = max((len(r) for r in rows), default=4)
+                self.notes_table.setColumnCount(cols)
+                for r, row in enumerate(rows):
+                    for c, val in enumerate(row):
+                        if c >= self.notes_table.columnCount():
+                            self.notes_table.setColumnCount(c + 1)
+                        item = QTableWidgetItem(str(val))
+                        self.notes_table.setItem(r, c, item)
+                self._notes_apply_excel_headers()
+            except json.JSONDecodeError:
+                self.notes_table.setRowCount(0)
+                self._notes_apply_excel_headers()
+            if self.notes_table.rowCount() == 0:
+                self._notes_add_row()
+            self.notes_tabs.setCurrentIndex(1)
+            if self.notes_table.rowCount() > 0:
+                self.notes_table.setCurrentCell(0, 0)
+            if hasattr(self, "_notes_undo_stack"):
+                self._notes_undo_stack.clear()
+                self._notes_redo_stack.clear()
+                self.notes_undo_btn.setEnabled(False)
+                self.notes_redo_btn.setEnabled(False)
+
+    def _save_note_to_list(self) -> None:
+        client_id = getattr(self, "selected_client_id", None)
+        if client_id is None:
+            QMessageBox.information(self, "Note", "Seleziona un cliente prima di salvare.")
+            return
+        title = self.notes_title_edit.text().strip() or "Senza titolo"
+        is_table = self.notes_tabs.currentIndex() == 1
+        if is_table:
+            content = self._notes_table_to_json()
+        else:
+            content = self.notes_text_edit.toPlainText()
+        repo = self.repository.clients if hasattr(self.repository, "clients") else self.repository
+        try:
+            repo.save_client_note(
+                self._current_note_id, int(client_id), title,
+                "table" if is_table else "text", content
+            )
+        except ValueError as exc:
+            QMessageBox.warning(self, "Note", str(exc))
+            return
+        client = self.clients_by_id.get(int(client_id))
+        if client:
+            self._render_client_notes(client)
+        QMessageBox.information(self, "Note", "Nota salvata nella lista.")
+
+    def _notes_table_to_json(self) -> str:
+        import json
+        rows = []
+        for r in range(self.notes_table.rowCount()):
+            row = []
+            for c in range(self.notes_table.columnCount()):
+                item = self.notes_table.item(r, c)
+                row.append(item.text() if item else "")
+            rows.append(row)
+        return json.dumps(rows, ensure_ascii=False)
+
+    def _notes_table_from_plain_text(self, text: str) -> None:
+        """Sostituisce la tabella con i dati dal testo (tab/CR separati)."""
+        lines = [line for line in text.splitlines()]
+        sep = "\t" if any("\t" in line for line in lines) else ","
+        rows = [[c.strip() for c in line.split(sep)] for line in lines]
+        if not rows:
+            self.notes_table.setRowCount(0)
+            self.notes_table.setColumnCount(4)
+            self._notes_apply_excel_headers()
+            return
+        cols = max(len(r) for r in rows)
+        self.notes_table.setRowCount(len(rows))
+        self.notes_table.setColumnCount(cols)
+        for r, row in enumerate(rows):
+            for c in range(cols):
+                val = row[c] if c < len(row) else ""
+                self.notes_table.setItem(r, c, QTableWidgetItem(val))
+        self._notes_apply_excel_headers()
+
+    def _new_note(self) -> None:
+        self._current_note_id = None
+        self.notes_title_edit.clear()
+        self.notes_text_edit.clear()
+        self.notes_table.setRowCount(0)
+        self.notes_table.setColumnCount(4)
+        self._notes_apply_excel_headers()
+        self._notes_add_row()
+        self.notes_tabs.setCurrentIndex(0)
+        if hasattr(self, "notes_list_combo"):
+            self.notes_list_combo.setCurrentIndex(0)
+
+    def _delete_selected_note(self) -> None:
+        note_id = self.notes_list_combo.currentData(Qt.ItemDataRole.UserRole)
+        if note_id is None:
+            QMessageBox.information(self, "Note", "Seleziona una nota dalla lista da eliminare.")
+            return
+        if QMessageBox.question(
+            self, "Conferma", "Eliminare questa nota dalla lista?"
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        repo = self.repository.clients if hasattr(self.repository, "clients") else self.repository
+        repo.delete_client_note(int(note_id))
+        client_id = getattr(self, "selected_client_id", None)
+        if client_id:
+            client = self.clients_by_id.get(int(client_id))
+            if client:
+                self._render_client_notes(client)
+        self._new_note()
+
+    def _export_note_to_file_and_archive(self) -> None:
+        client_id = getattr(self, "selected_client_id", None)
+        if client_id is None:
+            QMessageBox.information(self, "Note", "Seleziona un cliente prima di esportare.")
+            return
+        client = self.clients_by_id.get(int(client_id))
+        if not client:
+            return
+        client_name = (client.get("name") or "Cliente").strip()
+        is_table = self.notes_tabs.currentIndex() == 1
+        if is_table:
+            ext_filter = "Fogli Excel (*.xlsx);;File di testo (*.txt);;Tutti i file (*.*)"
+            default_ext = "xlsx"
+        else:
+            ext_filter = "File di testo (*.txt);;Tutti i file (*.*)"
+            default_ext = "txt"
+
+        path, selected_filter = QFileDialog.getSaveFileName(
+            self, "Salva nota in file",
+            f"Nota_{client_name}.{default_ext}",
+            ext_filter,
+        )
+        if not path or not path.strip():
+            return
+
+        is_xlsx = path.lower().endswith(".xlsx") or "xlsx" in (selected_filter or "").lower()
+        try:
+            if is_xlsx:
+                from openpyxl import Workbook
+                wb = Workbook()
+                ws = wb.active
+                ws.title = "Note"
+                for r in range(self.notes_table.rowCount()):
+                    for c in range(self.notes_table.columnCount()):
+                        item = self.notes_table.item(r, c)
+                        val = item.text() if item else ""
+                        ws.cell(row=r + 1, column=c + 1, value=val)
+                wb.save(path)
+            else:
+                if is_table:
+                    lines = []
+                    for r in range(self.notes_table.rowCount()):
+                        row = []
+                        for c in range(self.notes_table.columnCount()):
+                            item = self.notes_table.item(r, c)
+                            row.append(item.text() if item else "")
+                        lines.append("\t".join(row))
+                    text_content = "\n".join(lines)
+                else:
+                    text_content = self.notes_text_edit.toPlainText()
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(text_content)
+        except OSError as exc:
+            QMessageBox.warning(self, "Note", f"Errore salvataggio file:\n{exc}")
+            return
+
+        repo = self.repository.clients if hasattr(self.repository, "clients") else self.repository
+        try:
+            repo.get_or_create_tag_for_client(int(client_id), client_name)
+        except ValueError:
+            pass
+        try:
+            if hasattr(self.repository, "archive"):
+                self.repository.archive.add_file(None, path, client_name)
+            else:
+                self.repository.add_archive_file(None, path, client_name)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Note", f"File salvato ma errore archivio:\n{exc}")
+            return
+        QMessageBox.information(self, "Note", "File salvato e aggiunto all'archivio con tag del cliente.")
+        if hasattr(self, "refresh_views"):
+            self.refresh_views()
+
     def eventFilter(self, watched, event):
         if (
             hasattr(self, "contacts_table")
@@ -659,7 +1693,143 @@ class ClientsMixin:
         ):
             self._paste_contacts_from_clipboard()
             return True
+        if (
+            hasattr(self, "notes_table")
+            and watched is self.notes_table
+            and event.type() == QEvent.Type.KeyPress
+        ):
+            if event.matches(QKeySequence.StandardKey.Copy):
+                self._copy_notes_to_clipboard("both")
+                return True
+            if event.matches(QKeySequence.StandardKey.Paste):
+                self._paste_notes_table_from_clipboard()
+                return True
+            mods = event.modifiers()
+            ctrl_shift = (
+                (mods & Qt.KeyboardModifier.ControlModifier)
+                and (mods & Qt.KeyboardModifier.ShiftModifier)
+            )
+            if ctrl_shift and event.key() in (
+                Qt.Key.Key_Left, Qt.Key.Key_Right,
+                Qt.Key.Key_Up, Qt.Key.Key_Down
+            ):
+                if self._notes_select_to_edge(event.key()):
+                    return True
+            if event.key() == Qt.Key.Key_Down and self._notes_extend_down():
+                return True
+            if event.key() == Qt.Key.Key_Right and self._notes_extend_right():
+                return True
+            if event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
+                sel = self.notes_table.selectedRanges()
+                if sel:
+                    self._notes_clear_selected_cells()
+                    return True
+            if event.matches(QKeySequence.StandardKey.Undo):
+                self._notes_undo()
+                return True
+            if event.matches(QKeySequence.StandardKey.Redo):
+                self._notes_redo()
+                return True
+        if (
+            hasattr(self, "notes_cell_preview")
+            and watched is self.notes_cell_preview
+            and event.type() == QEvent.Type.FocusIn
+        ):
+            if self.notes_tabs.currentIndex() == 1:
+                self._notes_snapshot()
         return super().eventFilter(watched, event)
+
+    def _copy_notes_to_clipboard(self, mode: str = "both") -> None:
+        """Copia le celle selezionate per Excel (TSV) e/o Word (HTML tabella)."""
+        ranges = self.notes_table.selectedRanges()
+        if not ranges:
+            return
+        min_r = min(rng.topRow() for rng in ranges)
+        max_r = max(rng.bottomRow() for rng in ranges)
+        min_c = min(rng.leftColumn() for rng in ranges)
+        max_c = max(rng.rightColumn() for rng in ranges)
+
+        def is_selected(r: int, c: int) -> bool:
+            return any(
+                rng.topRow() <= r <= rng.bottomRow()
+                and rng.leftColumn() <= c <= rng.rightColumn()
+                for rng in ranges
+            )
+
+        cells: list[list[str]] = []
+        for r in range(min_r, max_r + 1):
+            row_list: list[str] = []
+            for c in range(min_c, max_c + 1):
+                item = self.notes_table.item(r, c) if is_selected(r, c) else None
+                row_list.append(item.text() if item else "")
+            cells.append(row_list)
+
+        tsv = "\n".join("\t".join(cell for cell in row) for row in cells)
+
+        html_rows = []
+        for row in cells:
+            cells_html = "".join(f"<td>{escape(str(c))}</td>" for c in row)
+            html_rows.append(f"<tr>{cells_html}</tr>")
+        html = f"<html><body><table border='1'><tbody>{''.join(html_rows)}</tbody></table></body></html>"
+
+        mime = QMimeData()
+        if mode == "word":
+            mime.setHtml(html)
+        else:
+            mime.setText(tsv)
+            if mode == "both":
+                mime.setHtml(html)
+        QGuiApplication.clipboard().setMimeData(mime)
+
+    def _paste_notes_as_table(self) -> None:
+        """Incolla sostituendo l'intera tabella con la struttura incollata (come Word)."""
+        self._notes_snapshot()
+        text = QGuiApplication.clipboard().text()
+        if not text or not text.strip():
+            return
+        self._notes_table_from_plain_text(text)
+        if self.notes_table.rowCount() == 0:
+            self._notes_add_row()
+
+    def _paste_notes_table_from_clipboard(self) -> None:
+        """Incolla nel punto corrente cella per cella (come Excel)."""
+        if self.notes_tabs.currentIndex() != 1:
+            return
+        self._notes_snapshot()
+        text = QGuiApplication.clipboard().text()
+        if not text or not text.strip():
+            return
+        lines = [line for line in text.splitlines()]
+        sep = "\t" if any("\t" in line for line in lines) else ","
+        rows = [[c.strip() for c in line.split(sep)] for line in lines]
+        if not rows:
+            return
+        anchor_r = max(0, self.notes_table.currentRow())
+        anchor_c = max(0, self.notes_table.currentColumn())
+        max_cols = max(len(row) for row in rows)
+        need_rows = anchor_r + len(rows)
+        need_cols = anchor_c + max_cols
+        while self.notes_table.rowCount() < need_rows:
+            r = self.notes_table.rowCount()
+            self.notes_table.insertRow(r)
+            for c in range(self.notes_table.columnCount()):
+                self.notes_table.setItem(r, c, QTableWidgetItem(""))
+        if need_cols > self.notes_table.columnCount():
+            self.notes_table.setColumnCount(need_cols)
+            for r in range(self.notes_table.rowCount()):
+                for c in range(self.notes_table.columnCount()):
+                    if self.notes_table.item(r, c) is None:
+                        self.notes_table.setItem(r, c, QTableWidgetItem(""))
+        for dr, row in enumerate(rows):
+            r = anchor_r + dr
+            for dc, val in enumerate(row):
+                c = anchor_c + dc
+                item = self.notes_table.item(r, c)
+                if item:
+                    item.setText(val)
+                else:
+                    self.notes_table.setItem(r, c, QTableWidgetItem(val))
+        self._notes_apply_excel_headers()
 
     def _paste_contacts_from_clipboard(self) -> None:
         client_id = getattr(self, "selected_client_id", None)
@@ -1167,7 +2337,7 @@ class ClientsMixin:
         self._render_access_credentials(client, selected_product)
         self._render_client_tag_documents(client)
         self._render_client_contacts(client)
-    
+        self._render_client_notes(client)
 
     def _render_access_credentials(self, client: dict, selected_product: dict | None) -> None:
         self.access_credentials_table.setRowCount(0)

@@ -1,6 +1,10 @@
 ; Inno Setup script - HD Manager Desktop
 ; Compila con Inno Setup 6.x
 ;
+; Comportamento:
+; - Se già installato: AGGIORNAMENTO - sostituisce exe e file, mantiene dati in %LOCALAPPDATA%\HDManagerDesktop
+; - Se non installato: INSTALLAZIONE PULITA - installa da zero
+;
 ; Uso rapido:
 ; 1) Crea la build dell'app (es. PyInstaller) in: .\dist\HDManagerDesktop\
 ; 2) Apri questo file in Inno Setup Compiler
@@ -10,7 +14,7 @@
   #define AppName "HD Manager Desktop"
 #endif
 #ifndef AppVersion
-  #define AppVersion "1.0.2"
+  #define AppVersion "1.0.3"
 #endif
 #ifndef AppPublisher
   #define AppPublisher "HD Manager"
@@ -35,7 +39,7 @@ LicenseFile=
 PrivilegesRequired=admin
 ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir=dist-installer
-OutputBaseFilename=HDManagerDesktop-Setup
+OutputBaseFilename=HDManagerDesktop-Setup-{#AppVersion}
 Compression=lzma
 SolidCompression=yes
 WizardStyle=modern

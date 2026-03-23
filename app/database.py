@@ -213,6 +213,15 @@ CREATE TABLE IF NOT EXISTS client_contacts (
     note TEXT
 );
 
+CREATE TABLE IF NOT EXISTS client_notes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    client_id INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+    title TEXT NOT NULL,
+    content_type TEXT NOT NULL CHECK (content_type IN ('text', 'table')),
+    content TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS client_pending_relations (
     client_id INTEGER PRIMARY KEY,
     vpn_connection_name TEXT,
@@ -575,6 +584,21 @@ def _migrate_client_contacts_table(connection: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_client_notes_table(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS client_notes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            client_id INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+            title TEXT NOT NULL,
+            content_type TEXT NOT NULL CHECK (content_type IN ('text', 'table')),
+            content TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        """
+    )
+
+
 def _migrate_client_pending_relations_table(connection: sqlite3.Connection) -> None:
     connection.execute(
         """
@@ -603,6 +627,7 @@ def init_db() -> None:
         _migrate_tags_client_column(connection)
         _migrate_archive_favorites_table(connection)
         _migrate_client_contacts_table(connection)
+        _migrate_client_notes_table(connection)
         _migrate_client_pending_relations_table(connection)
         _migrate_indexes(connection)
         connection.commit()

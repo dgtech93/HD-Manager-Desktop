@@ -2031,6 +2031,84 @@ class Repository:
             "Eliminazione contatto",
         )
 
+    # Note cliente
+    def list_client_notes(self, client_id: int) -> list[dict]:
+        return self._query(
+            """
+            SELECT id, title, content_type, content, created_at
+            FROM client_notes
+            WHERE client_id=?
+            ORDER BY created_at DESC;
+            """,
+            (int(client_id),),
+        )
+
+    def save_client_note(
+        self,
+        note_id: int | None,
+        client_id: int,
+        title: str,
+        content_type: str,
+        content: str,
+    ) -> int:
+        clean_title = self._req(title, "Titolo nota")
+        if content_type not in ("text", "table"):
+            raise ValueError("content_type deve essere 'text' o 'table'.")
+        if note_id:
+            self._execute(
+                """
+                UPDATE client_notes SET title=?, content_type=?, content=? WHERE id=?;
+                """,
+                (clean_title, content_type, content, int(note_id)),
+                "Aggiornamento nota",
+            )
+            return int(note_id)
+        return self._insert(
+            """
+            INSERT INTO client_notes(client_id, title, content_type, content)
+            VALUES (?, ?, ?, ?);
+            """,
+            (int(client_id), clean_title, content_type, content),
+            "Inserimento nota",
+        )
+
+    def delete_client_note(self, note_id: int) -> None:
+        self._execute(
+            "DELETE FROM client_notes WHERE id=?;",
+            (int(note_id),),
+            "Eliminazione nota",
+        )
+
+    def get_client_note(self, note_id: int) -> dict | None:
+        rows = self._query(
+            "SELECT id, client_id, title, content_type, content, created_at FROM client_notes WHERE id=?;",
+            (int(note_id),),
+        )
+        return dict(rows[0]) if rows else None
+
+    def get_or_create_tag_for_client(self, client_id: int, client_name: str) -> int:
+        """Restituisce l'id del tag con nome=client_name associato al cliente, creandolo se necessario."""
+        client_id = int(client_id)
+        clean_name = (client_name or "").strip()
+        if not clean_name:
+            raise ValueError("Nome cliente obbligatorio per il tag.")
+        rows = self._query("SELECT id, client_id FROM tags WHERE name=?;", (clean_name,))
+        if rows:
+            row = rows[0]
+            tag_id = int(row["id"])
+            if row["client_id"] is None:
+                self._execute(
+                    "UPDATE tags SET client_id=? WHERE id=?;",
+                    (client_id, tag_id),
+                    "Associazione tag cliente",
+                )
+            return tag_id
+        return self._insert(
+            "INSERT INTO tags(name, color, client_id) VALUES (?, ?, ?);",
+            (clean_name, "#0f766e", client_id),
+            "Creazione tag cliente",
+        )
+
     # Compatibilita API precedente (used by smoke test / old calls)
     def add_competence(self, name: str) -> int:
         return self.upsert_competence(None, name)
