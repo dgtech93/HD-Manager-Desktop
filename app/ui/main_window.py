@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QFont, QIcon, QPixmap
+from PyQt6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap
 from PyQt6.QtWidgets import (
+    QFrame,
     QHBoxLayout,
     QLabel,
     QLayout,
@@ -21,6 +24,37 @@ from app.ui.clients_mixin import ClientsMixin
 from app.ui.archive_mixin import ArchiveMixin
 
 
+def _pixmap_circular(source: QPixmap, diameter: int) -> QPixmap:
+    """Ridimensiona l'immagine e la ritaglia in un cerchio (antialias)."""
+    if source.isNull():
+        return source
+    side = diameter
+    scaled = source.scaled(
+        side,
+        side,
+        Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+        Qt.TransformationMode.SmoothTransformation,
+    )
+    sx = max(0, (scaled.width() - side) // 2)
+    sy = max(0, (scaled.height() - side) // 2)
+    out = QPixmap(side, side)
+    out.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(out)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    path = QPainterPath()
+    path.addEllipse(0, 0, side, side)
+    painter.setClipPath(path)
+    painter.drawPixmap(0, 0, side, side, scaled, sx, sy, side, side)
+    painter.setClipping(False)
+    pen = QPen(QColor(255, 255, 255, 230))
+    pen.setWidth(2)
+    painter.setPen(pen)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.drawEllipse(1, 1, side - 2, side - 2)
+    painter.end()
+    return out
+
+
 class MainWindow(ClientsMixin, ArchiveMixin, QMainWindow):
     def __init__(self, repository) -> None:
         super().__init__()
@@ -30,8 +64,6 @@ class MainWindow(ClientsMixin, ArchiveMixin, QMainWindow):
         # Icona principale della finestra (taskbar + titlebar).
         # Se non trova il file, continua senza bloccare l'app.
         try:
-            from pathlib import Path
-
             icon_path = Path(__file__).resolve().parent.parent / "assets" / "image.ico"
             if icon_path.exists():
                 self.setWindowIcon(QIcon(str(icon_path)))
@@ -61,46 +93,51 @@ class MainWindow(ClientsMixin, ArchiveMixin, QMainWindow):
         self.setCentralWidget(root)
 
         layout = QVBoxLayout(root)
-        layout.setContentsMargins(18, 18, 18, 18)
-        layout.setSpacing(14)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
-        top = QHBoxLayout()
+        header_frame = QFrame()
+        header_frame.setObjectName("headerFrame")
+        header_frame.setMinimumHeight(100)
+        header_layout = QVBoxLayout(header_frame)
+        header_layout.setContentsMargins(24, 20, 24, 20)
+        header_layout.setSpacing(8)
+
+        top_row = QHBoxLayout()
+        top_row.setSpacing(16)
         self.settings_btn = QPushButton("Impostazioni")
         self.settings_btn.setObjectName("settingsButton")
         self.settings_btn.clicked.connect(self.open_settings)
-        top.addWidget(self.settings_btn, alignment=Qt.AlignmentFlag.AlignLeft)
+        top_row.addWidget(self.settings_btn)
 
-        self.header_banner_label = QLabel()
-        self.header_banner_label.setObjectName("headerBannerLabel")
-        self.header_banner_label.setFixedHeight(96)
-        self.header_banner_label.setAlignment(
-            Qt.AlignmentFlag.AlignCenter
+        top_row.addStretch()
+        self.header_logo_label = QLabel()
+        self.header_logo_label.setObjectName("headerLogoLabel")
+        self.header_logo_label.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.header_logo_label.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
-        self.header_banner_label.setVisible(False)
-        self.header_banner_original_pixmap: QPixmap | None = None
-        self.header_banner_label.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
-        )
+        icon_path = Path(__file__).resolve().parent.parent / "assets" / "image.ico"
+        if icon_path.exists():
+            pm = QPixmap(str(icon_path))
+            if not pm.isNull():
+                self.header_logo_label.setPixmap(_pixmap_circular(pm, 88))
+        top_row.addWidget(self.header_logo_label, 0, Qt.AlignmentFlag.AlignRight)
 
-        top.addWidget(self.header_banner_label, 1)
-        layout.addLayout(top)
+        header_layout.addLayout(top_row)
+        layout.addWidget(header_frame)
 
-        title = QLabel("Archivio HD Manager")
-        title.setFont(QFont("Segoe UI", 24, QFont.Weight.Bold))
-        title.setObjectName("mainTitle")
-        layout.addWidget(title)
-
-        subtitle = QLabel("")
-        subtitle.setObjectName("subTitle")
-        subtitle.setWordWrap(True)
-        layout.addWidget(subtitle)
+        content_layout = QVBoxLayout()
+        content_layout.setContentsMargins(18, 16, 18, 18)
+        content_layout.setSpacing(14)
 
         self.main_tabs = QTabWidget()
         self.main_tabs.setObjectName("mainTabs")
         self.main_tabs.addTab(self._build_clients_tab(), "Clienti")
         self.main_tabs.addTab(self._build_archive_tab(), "Archivio")
         self.main_tabs.currentChanged.connect(self._on_main_tab_changed)
-        layout.addWidget(self.main_tabs, 1)
+        content_layout.addWidget(self.main_tabs, 1)
+        layout.addLayout(content_layout)
 
     def _build_clients_tab(self) -> QWidget:
         return self._build_client_workspace_page("Pagina Cliente")
@@ -127,60 +164,11 @@ class MainWindow(ClientsMixin, ArchiveMixin, QMainWindow):
 
     def refresh_views(self) -> None:
         selected_client_id, selected_product_id = self._selected_archive_selection()
-        self._refresh_header_banner()
         self._load_data()
         self._render_favorites()
         self._render_tags()
         self._render_archive_overview()
         self._render_archive_client_list(selected_client_id, selected_product_id)
-
-    def _refresh_header_banner(self) -> None:
-        if not hasattr(self, "header_banner_label"):
-            return
-        from pathlib import Path
-        banner_path = Path(__file__).resolve().parent.parent / "assets" / "banner.png"
-
-        if not banner_path.exists():
-            self.header_banner_label.clear()
-            self.header_banner_label.setVisible(False)
-            self.header_banner_original_pixmap = None
-            return
-
-        pixmap = QPixmap(str(banner_path))
-        if pixmap.isNull():
-            self.header_banner_label.clear()
-            self.header_banner_label.setVisible(False)
-            self.header_banner_original_pixmap = None
-            return
-
-        self.header_banner_original_pixmap = pixmap
-        self._update_header_banner_scaled_pixmap()
-        self.header_banner_label.setVisible(True)
-
-    def _update_header_banner_scaled_pixmap(self) -> None:
-        if (
-            not hasattr(self, "header_banner_label")
-            or self.header_banner_original_pixmap is None
-            or self.header_banner_original_pixmap.isNull()
-        ):
-            return
-
-        label_size = self.header_banner_label.size()
-        if label_size.width() <= 0 or label_size.height() <= 0:
-            return
-
-        # Fit mode: mostra sempre tutto il banner senza ritagli.
-        fitted = self.header_banner_original_pixmap.scaled(
-            label_size.width(),
-            label_size.height(),
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        self.header_banner_label.setPixmap(fitted)
-
-    def resizeEvent(self, event) -> None:
-        super().resizeEvent(event)
-        self._update_header_banner_scaled_pixmap()
 
     def _load_data(self) -> None:
         # MVC: if a controller is injected as `repository`, use its cache.
@@ -317,6 +305,14 @@ class MainWindow(ClientsMixin, ArchiveMixin, QMainWindow):
             }
             #settingsButton:hover {
                 background: #0b5f58;
+            }
+            #headerFrame {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #2563eb, stop:0.45 #3b82f6, stop:1 #dbeafe);
+                border-bottom: 1px solid #2563eb;
+            }
+            #headerLogoLabel {
+                background: transparent;
             }
             #refreshButton {
                 background: #ffffff;

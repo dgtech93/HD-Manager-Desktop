@@ -2,8 +2,10 @@
 ; Compila con Inno Setup 6.x
 ;
 ; Comportamento:
-; - Se già installato: AGGIORNAMENTO - sostituisce exe e file, mantiene dati in %LOCALAPPDATA%\HDManagerDesktop
-; - Se non installato: INSTALLAZIONE PULITA - installa da zero
+; - Stesso AppId: se HD Manager è già installato, l'installer AGGIORNA in-place (exe e file sotto {app})
+;   senza toccare dati utente fuori dalla cartella programma (es. %LOCALAPPDATA%\HDManagerDesktop).
+; - Prima installazione: installazione pulita in Program Files (o cartella scelta).
+; - Disinstallazione: i dati locali si rimuovono solo se l'utente conferma nella dialog di disinstallazione.
 ;
 ; Uso rapido:
 ; 1) Crea la build dell'app (es. PyInstaller) in: .\dist\HDManagerDesktop\
@@ -14,7 +16,7 @@
   #define AppName "HD Manager Desktop"
 #endif
 #ifndef AppVersion
-  #define AppVersion "1.0.3"
+  #define AppVersion "1.0.4"
 #endif
 #ifndef AppPublisher
   #define AppPublisher "HD Manager"
@@ -33,6 +35,7 @@ AppVersion={#AppVersion}
 AppPublisher={#AppPublisher}
 DefaultDirName={autopf}\HD Manager Desktop
 DefaultGroupName=HD Manager Desktop
+DisableDirPage=auto
 DisableProgramGroupPage=yes
 UsePreviousAppDir=yes
 LicenseFile=

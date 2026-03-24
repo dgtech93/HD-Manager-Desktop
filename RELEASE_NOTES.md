@@ -1,6 +1,19 @@
-# HD Manager Desktop - Release v1.0.3
+# HD Manager Desktop - Release v1.0.4
 
 Applicazione desktop per la gestione di clienti, prodotti, risorse, VPN e archivio documentale.
+
+---
+
+## Note di rilascio v1.0.4
+
+### Interfaccia
+- Barra superiore: icona applicazione in formato circolare (senza titolo testuale ripetuto).
+
+### Tab Note Cliente
+- **Salva in file e archivio**: salva anche la nota nella **lista note** del cliente (oltre a file e archivio), così i dati restano allineati.
+
+### Installer
+- Aggiornamento in-place: in caso di reinstallazione sulla stessa cartella, la schermata della cartella di installazione viene omessa quando possibile (`DisableDirPage=auto`).
 
 ---
 
@@ -65,16 +78,16 @@ Applicazione desktop per la gestione di clienti, prodotti, risorse, VPN e archiv
 
 ## Installazione
 
-1. Scarica `HDManagerDesktop-Setup-1.0.3.exe` dalla release
+1. Scarica `HDManagerDesktop-Setup-1.0.4.exe` dalla release
 2. Esegui l'installer (richiesti privilegi amministratore)
 3. Segui la procedura guidata
 4. Opzionale: crea icona sul desktop
 
 ### Aggiornamento
-Se HD Manager Desktop è già installato, l'installer **aggiorna i file** mantenendo i dati esistenti (database e log in `%LOCALAPPDATA%\HDManagerDesktop\`). Nessuna perdita di dati.
+Se HD Manager Desktop è già installato (stesso identificativo applicazione), l'installer **sostituisce solo i file del programma** nella cartella di installazione (tipicamente `Program Files`) e **non** elimina database, log o altri dati in `%LOCALAPPDATA%\HDManagerDesktop\`.
 
 ### Nuova installazione
-Se il programma non è installato, l'installer esegue una **installazione pulita**.
+Se il programma non è installato, l'installer propone una **nuova installazione** in una cartella pulita (nessun dato precedente).
 
 ---
 

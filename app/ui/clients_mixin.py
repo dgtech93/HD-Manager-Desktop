@@ -1526,11 +1526,12 @@ class ClientsMixin:
                 self.notes_undo_btn.setEnabled(False)
                 self.notes_redo_btn.setEnabled(False)
 
-    def _save_note_to_list(self) -> None:
+    def _persist_current_note(self, *, refresh_list: bool = True) -> bool:
+        """Salva titolo e contenuto della nota corrente nel database."""
         client_id = getattr(self, "selected_client_id", None)
         if client_id is None:
             QMessageBox.information(self, "Note", "Seleziona un cliente prima di salvare.")
-            return
+            return False
         title = self.notes_title_edit.text().strip() or "Senza titolo"
         is_table = self.notes_tabs.currentIndex() == 1
         if is_table:
@@ -1545,10 +1546,16 @@ class ClientsMixin:
             )
         except ValueError as exc:
             QMessageBox.warning(self, "Note", str(exc))
+            return False
+        if refresh_list:
+            client = self.clients_by_id.get(int(client_id))
+            if client:
+                self._render_client_notes(client)
+        return True
+
+    def _save_note_to_list(self) -> None:
+        if not self._persist_current_note(refresh_list=True):
             return
-        client = self.clients_by_id.get(int(client_id))
-        if client:
-            self._render_client_notes(client)
         QMessageBox.information(self, "Note", "Nota salvata nella lista.")
 
     def _notes_table_to_json(self) -> str:
@@ -1619,6 +1626,8 @@ class ClientsMixin:
         client = self.clients_by_id.get(int(client_id))
         if not client:
             return
+        if not self._persist_current_note(refresh_list=False):
+            return
         client_name = (client.get("name") or "Cliente").strip()
         is_table = self.notes_tabs.currentIndex() == 1
         if is_table:
@@ -1628,61 +1637,68 @@ class ClientsMixin:
             ext_filter = "File di testo (*.txt);;Tutti i file (*.*)"
             default_ext = "txt"
 
-        path, selected_filter = QFileDialog.getSaveFileName(
-            self, "Salva nota in file",
-            f"Nota_{client_name}.{default_ext}",
-            ext_filter,
-        )
-        if not path or not path.strip():
-            return
-
-        is_xlsx = path.lower().endswith(".xlsx") or "xlsx" in (selected_filter or "").lower()
         try:
-            if is_xlsx:
-                from openpyxl import Workbook
-                wb = Workbook()
-                ws = wb.active
-                ws.title = "Note"
-                for r in range(self.notes_table.rowCount()):
-                    for c in range(self.notes_table.columnCount()):
-                        item = self.notes_table.item(r, c)
-                        val = item.text() if item else ""
-                        ws.cell(row=r + 1, column=c + 1, value=val)
-                wb.save(path)
-            else:
-                if is_table:
-                    lines = []
+            path, selected_filter = QFileDialog.getSaveFileName(
+                self, "Salva nota in file",
+                f"Nota_{client_name}.{default_ext}",
+                ext_filter,
+            )
+            if not path or not path.strip():
+                return
+
+            is_xlsx = path.lower().endswith(".xlsx") or "xlsx" in (selected_filter or "").lower()
+            try:
+                if is_xlsx:
+                    from openpyxl import Workbook
+                    wb = Workbook()
+                    ws = wb.active
+                    ws.title = "Note"
                     for r in range(self.notes_table.rowCount()):
-                        row = []
                         for c in range(self.notes_table.columnCount()):
                             item = self.notes_table.item(r, c)
-                            row.append(item.text() if item else "")
-                        lines.append("\t".join(row))
-                    text_content = "\n".join(lines)
+                            val = item.text() if item else ""
+                            ws.cell(row=r + 1, column=c + 1, value=val)
+                    wb.save(path)
                 else:
-                    text_content = self.notes_text_edit.toPlainText()
-                with open(path, "w", encoding="utf-8") as f:
-                    f.write(text_content)
-        except OSError as exc:
-            QMessageBox.warning(self, "Note", f"Errore salvataggio file:\n{exc}")
-            return
+                    if is_table:
+                        lines = []
+                        for r in range(self.notes_table.rowCount()):
+                            row = []
+                            for c in range(self.notes_table.columnCount()):
+                                item = self.notes_table.item(r, c)
+                                row.append(item.text() if item else "")
+                            lines.append("\t".join(row))
+                        text_content = "\n".join(lines)
+                    else:
+                        text_content = self.notes_text_edit.toPlainText()
+                    with open(path, "w", encoding="utf-8") as f:
+                        f.write(text_content)
+            except OSError as exc:
+                QMessageBox.warning(self, "Note", f"Errore salvataggio file:\n{exc}")
+                return
 
-        repo = self.repository.clients if hasattr(self.repository, "clients") else self.repository
-        try:
-            repo.get_or_create_tag_for_client(int(client_id), client_name)
-        except ValueError:
-            pass
-        try:
-            if hasattr(self.repository, "archive"):
-                self.repository.archive.add_file(None, path, client_name)
-            else:
-                self.repository.add_archive_file(None, path, client_name)
-        except ValueError as exc:
-            QMessageBox.warning(self, "Note", f"File salvato ma errore archivio:\n{exc}")
-            return
-        QMessageBox.information(self, "Note", "File salvato e aggiunto all'archivio con tag del cliente.")
-        if hasattr(self, "refresh_views"):
-            self.refresh_views()
+            repo = self.repository.clients if hasattr(self.repository, "clients") else self.repository
+            try:
+                repo.get_or_create_tag_for_client(int(client_id), client_name)
+            except ValueError:
+                pass
+            try:
+                if hasattr(self.repository, "archive"):
+                    self.repository.archive.add_file(None, path, client_name)
+                else:
+                    self.repository.add_archive_file(None, path, client_name)
+            except ValueError as exc:
+                QMessageBox.warning(self, "Note", f"File salvato ma errore archivio:\n{exc}")
+                return
+            QMessageBox.information(
+                self,
+                "Note",
+                "Nota salvata nella lista, file esportato e aggiunto all'archivio con tag del cliente.",
+            )
+            if hasattr(self, "refresh_views"):
+                self.refresh_views()
+        finally:
+            self._render_client_notes(client)
 
     def eventFilter(self, watched, event):
         if (
