@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from functools import partial
 from html import escape
 
@@ -8,13 +9,25 @@ import subprocess
 import sys
 import tempfile
 from collections import defaultdict
+from urllib.parse import quote, quote_plus, unquote, urlparse
 
 _SUBPROCESS_FLAGS = (
     subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 )
 
-from PyQt6.QtCore import Qt, QUrl, QDate, QEvent, QThread, pyqtSignal, QMimeData
-from PyQt6.QtGui import QDesktopServices, QGuiApplication, QKeySequence, QColor, QPalette
+from PyQt6.QtCore import QRectF, Qt, QDate, QEvent, QMimeData, QThread, QTimer, QUrl, pyqtSignal
+from PyQt6.QtGui import (
+    QDesktopServices,
+    QFont,
+    QGuiApplication,
+    QColor,
+    QKeySequence,
+    QPainter,
+    QPainterPath,
+    QPalette,
+    QPixmap,
+)
+from PyQt6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -37,6 +50,7 @@ from PyQt6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSplitter,
     QSpinBox,
     QStackedWidget,
@@ -44,7 +58,6 @@ from PyQt6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QTableWidgetSelectionRange,
-    QToolButton,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -54,7 +67,35 @@ from PyQt6.QtWidgets import (
     QStyleOptionViewItem,
 )
 
+from app.ui.ui_constants import SIDE_MENU_TAB_CONTENT_MARGINS, SIDE_MENU_WIDTH_PX
 from app.views.dialogs import CredentialDialog, ContactDialog
+
+
+class _CopyOnDoubleClickLineEdit(QLineEdit):
+    """Campo in sola lettura: doppio clic copia il testo (ignora il placeholder '-')."""
+
+    def __init__(
+        self,
+        text: str = "-",
+        on_copied: Callable[[str], None] | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(text, parent)
+        self._on_copied = on_copied
+
+    def mouseDoubleClickEvent(self, event):
+        super().mouseDoubleClickEvent(event)
+        raw = self.text().strip()
+        if not raw or raw == "-":
+            return
+        QGuiApplication.clipboard().setText(raw)
+        if self._on_copied is not None:
+            self._on_copied(raw)
+
+
+_ACCESS_CREDENTIAL_COPY_KEYS = frozenset(
+    {"ip", "host", "url", "rdp_path", "username", "password"}
+)
 
 
 class _RdpConnectWorker(QThread):
@@ -592,19 +633,36 @@ class _ClientsTreeDelegate(QStyledItemDelegate):
 
 class ClientsMixin:
     # Clienti, accessi, rubrica
-    def _build_client_workspace_page(self, title_text: str) -> QWidget:
+    def _build_client_workspace_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(10)
-    
-        title = QLabel(title_text)
-        title.setObjectName("sectionTitle")
-        layout.addWidget(title)
-    
+        layout.setContentsMargins(*SIDE_MENU_TAB_CONTENT_MARGINS)
+        layout.setSpacing(0)
+
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setChildrenCollapsible(False)
-    
+
+        client_mode_col = QFrame()
+        client_mode_col.setObjectName("clientsModeColumn")
+        client_mode_l = QVBoxLayout(client_mode_col)
+        client_mode_l.setContentsMargins(0, 0, 0, 0)
+        client_mode_l.setSpacing(0)
+
+        self.client_side_menu = QListWidget()
+        self.client_side_menu.setObjectName("clientsSideMenu")
+        self.client_side_menu.setFixedWidth(SIDE_MENU_WIDTH_PX)
+        self.client_side_menu.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.client_side_menu.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        for label in (
+            "Info Cliente",
+            "Accessi",
+            "Archivio Cliente",
+            "Rubrica",
+            "Note",
+        ):
+            self.client_side_menu.addItem(QListWidgetItem(label))
+        client_mode_l.addWidget(self.client_side_menu, 1)
+
         left = QWidget()
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(0, 0, 0, 0)
@@ -612,13 +670,13 @@ class ClientsMixin:
         left_title = QLabel("Lista Clienti")
         left_title.setObjectName("subSectionTitle")
         left_layout.addWidget(left_title)
-    
+
         self.clients_filter = QLineEdit()
         self.clients_filter.setObjectName("clientsFilter")
         self.clients_filter.setPlaceholderText("Filtra clienti...")
         self.clients_filter.textChanged.connect(self._apply_clients_filter)
         left_layout.addWidget(self.clients_filter)
-    
+
         self.clients_tree = QTreeWidget()
         self.clients_tree.setObjectName("clientsTree")
         self.clients_tree.setHeaderHidden(True)
@@ -627,87 +685,218 @@ class ClientsMixin:
         self.clients_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.clients_tree.customContextMenuRequested.connect(self._on_clients_tree_menu)
         left_layout.addWidget(self.clients_tree, 1)
+        splitter.addWidget(client_mode_col)
         splitter.addWidget(left)
-    
+
         right = QWidget()
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(8)
-    
+
         self.client_detail_title = QLabel("Seleziona un cliente")
         self.client_detail_title.setObjectName("subSectionTitle")
         right_layout.addWidget(self.client_detail_title)
-    
+
         self.client_detail_meta = QLabel("")
         self.client_detail_meta.setObjectName("subText")
         right_layout.addWidget(self.client_detail_meta)
-    
-        self.client_tabs = QTabWidget()
-        self.client_tabs.addTab(self._build_client_info_tab(), "Info Cliente")
-        self.client_tabs.addTab(self._build_client_access_tab(), "Accessi")
-        self.client_tabs.addTab(self._build_client_archive_tab(), "Archivio Cliente")
-        self.client_tabs.addTab(self._build_client_contacts_tab(), "Rubrica")
-        self.client_tabs.addTab(self._build_client_notes_tab(), "Note")
-        right_layout.addWidget(self.client_tabs, 1)
+
+        self.client_stack = QStackedWidget()
+        self.client_stack.setObjectName("clientStack")
+        self.client_stack.addWidget(self._build_client_info_tab())
+        self.client_stack.addWidget(self._build_client_access_tab())
+        self.client_stack.addWidget(self._build_client_archive_tab())
+        self.client_stack.addWidget(self._build_client_contacts_tab())
+        self.client_stack.addWidget(self._build_client_notes_tab())
+        right_layout.addWidget(self.client_stack, 1)
+
+        self.client_side_menu.currentRowChanged.connect(self.client_stack.setCurrentIndex)
+        self.client_side_menu.setCurrentRow(0)
         splitter.addWidget(right)
-    
+
         splitter.setStretchFactor(0, 0)
-        splitter.setStretchFactor(1, 1)
-        splitter.setSizes([330, 820])
+        splitter.setStretchFactor(1, 0)
+        splitter.setStretchFactor(2, 1)
+        splitter.setSizes([SIDE_MENU_WIDTH_PX, 330, 820])
         layout.addWidget(splitter, 1)
         return page
     
 
+    def _client_info_card_header(self, icon: str, title: str) -> QFrame:
+        head = QFrame()
+        head.setObjectName("clientInfoCardHeader")
+        lay = QHBoxLayout(head)
+        lay.setContentsMargins(12, 10, 14, 10)
+        lay.setSpacing(8)
+        ic = QLabel(icon)
+        ic.setObjectName("clientInfoCardHeaderIcon")
+        lab = QLabel(title)
+        lab.setObjectName("clientInfoCardHeaderTitle")
+        lay.addWidget(ic, alignment=Qt.AlignmentFlag.AlignVCenter)
+        lay.addWidget(lab, 1, alignment=Qt.AlignmentFlag.AlignVCenter)
+        return head
+
+    def _client_info_data_row(self, layout: QVBoxLayout, label: str, *, is_link: bool = False, last: bool = False) -> QLabel:
+        row = QFrame()
+        row.setObjectName("clientInfoDataRowLast" if last else "clientInfoDataRow")
+        h = QHBoxLayout(row)
+        h.setContentsMargins(12, 8, 12, 8)
+        h.setSpacing(10)
+        k = QLabel(label)
+        k.setObjectName("clientInfoDataKey")
+        v = QLabel("-")
+        v.setObjectName("clientInfoLinkValue" if is_link else "clientInfoFieldValue")
+        v.setWordWrap(True)
+        h.addWidget(k, alignment=Qt.AlignmentFlag.AlignTop)
+        h.addWidget(v, 1)
+        layout.addWidget(row)
+        return v
+
     def _build_client_info_tab(self) -> QWidget:
         page = QWidget()
+        page.setObjectName("clientInfoTabPage")
+        page.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         layout = QVBoxLayout(page)
         layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(10)
-    
-        data_title = QLabel("Dati Cliente")
-        data_title.setObjectName("subSectionTitle")
-        layout.addWidget(data_title)
-    
-        data_grid = QGridLayout()
-        data_grid.setHorizontalSpacing(16)
-        data_grid.setVerticalSpacing(10)
-        self.info_name_value = self._add_info_row(data_grid, 0, "Nome")
-        self.info_location_value = self._add_info_row(data_grid, 1, "Localita")
-        self.info_link_value = self._add_info_row(data_grid, 2, "Link")
+        layout.setSpacing(14)
+
+        top_row = QHBoxLayout()
+        top_row.setSpacing(12)
+
+        data_card = QFrame()
+        data_card.setObjectName("clientInfoDataCard")
+        data_card.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        data_card.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.MinimumExpanding
+        )
+        data_outer = QVBoxLayout(data_card)
+        data_outer.setContentsMargins(0, 0, 0, 0)
+        data_outer.setSpacing(0)
+        data_outer.addWidget(self._client_info_card_header("📄", "Dati cliente"))
+        data_body = QWidget()
+        data_body_l = QVBoxLayout(data_body)
+        data_body_l.setContentsMargins(0, 0, 0, 0)
+        data_body_l.setSpacing(0)
+        self.info_name_value = self._client_info_data_row(data_body_l, "Nome")
+        self.info_location_value = self._client_info_data_row(data_body_l, "Località")
+        self.info_link_value = self._client_info_data_row(data_body_l, "Link", is_link=True, last=True)
         self.info_link_value.setTextFormat(Qt.TextFormat.RichText)
         self.info_link_value.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
         self.info_link_value.setOpenExternalLinks(True)
-        layout.addLayout(data_grid)
-    
-        roles_title = QLabel("Risorse divise per Ruolo")
+        data_outer.addWidget(data_body)
+        data_outer.addStretch()
+        data_card.setMinimumHeight(220)
+
+        products_card = QFrame()
+        products_card.setObjectName("clientProductsOuterCard")
+        products_card.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        products_card.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.MinimumExpanding
+        )
+        products_outer = QVBoxLayout(products_card)
+        products_outer.setContentsMargins(0, 0, 0, 0)
+        products_outer.setSpacing(0)
+        products_outer.addWidget(self._client_info_card_header("📦", "Prodotti collegati"))
+        products_body = QWidget()
+        products_body_l = QVBoxLayout(products_body)
+        products_body_l.setContentsMargins(10, 8, 10, 10)
+        products_body_l.setSpacing(0)
+
+        self.info_products_inner = QWidget()
+        self.info_products_layout = QVBoxLayout(self.info_products_inner)
+        self.info_products_layout.setContentsMargins(0, 0, 0, 0)
+        self.info_products_layout.setSpacing(8)
+        products_scroll = QScrollArea()
+        products_scroll.setObjectName("clientProductsScroll")
+        products_scroll.setWidgetResizable(True)
+        products_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        products_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        products_scroll.setMinimumHeight(180)
+        products_scroll.setWidget(self.info_products_inner)
+        products_body_l.addWidget(products_scroll, 1)
+        products_outer.addWidget(products_body, 1)
+        products_card.setMinimumHeight(220)
+
+        site_card = QFrame()
+        site_card.setObjectName("clientSitePreviewCard")
+        site_card.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        site_card.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.MinimumExpanding
+        )
+        site_outer = QVBoxLayout(site_card)
+        site_outer.setContentsMargins(0, 0, 0, 0)
+        site_outer.setSpacing(0)
+        site_outer.addWidget(self._client_info_card_header("🌐", "Anteprima sito"))
+        site_body = QWidget()
+        site_body_l = QVBoxLayout(site_body)
+        site_body_l.setContentsMargins(12, 12, 12, 12)
+        site_body_l.setSpacing(10)
+        site_preview = QFrame()
+        site_preview.setObjectName("clientSitePreview")
+        site_preview_l = QVBoxLayout(site_preview)
+        site_preview_l.setContentsMargins(12, 12, 12, 12)
+        site_preview_l.setSpacing(10)
+        self.info_site_logo = QLabel()
+        self.info_site_logo.setObjectName("clientSiteLogo")
+        self.info_site_logo.setFixedSize(88, 88)
+        self.info_site_logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.info_site_logo.setText("Sito")
+        site_preview_l.addWidget(self.info_site_logo, alignment=Qt.AlignmentFlag.AlignCenter)
+        self.info_site_host_label = QLabel("")
+        self.info_site_host_label.setObjectName("clientSiteHost")
+        self.info_site_host_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.info_site_host_label.setWordWrap(True)
+        host_bar = QFrame()
+        host_bar.setObjectName("clientSiteUrlBar")
+        host_l = QHBoxLayout(host_bar)
+        host_l.setContentsMargins(10, 6, 10, 6)
+        host_l.addWidget(self.info_site_host_label)
+        site_preview_l.addWidget(host_bar)
+        self.info_site_open_btn = QPushButton("Apri nel browser   ↗")
+        self.info_site_open_btn.setObjectName("clientSiteOpenButton")
+        self.info_site_open_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.info_site_open_btn.setEnabled(False)
+        self.info_site_open_btn.clicked.connect(self._open_client_website_from_info)
+        site_preview_l.addWidget(self.info_site_open_btn, alignment=Qt.AlignmentFlag.AlignCenter)
+        site_body_l.addWidget(site_preview, 1)
+        site_outer.addWidget(site_body, 1)
+        site_card.setMinimumHeight(220)
+
+        top_row.addWidget(data_card, 1)
+        top_row.addWidget(products_card, 1)
+        top_row.addWidget(site_card, 1)
+
+        layout.addLayout(top_row)
+
+        placeholder = QLabel(
+            "I prodotti collegati al cliente con ambienti e versioni appariranno qui."
+        )
+        placeholder.setObjectName("subText")
+        placeholder.setWordWrap(True)
+        self.info_products_layout.addWidget(placeholder)
+
+        roles_title = QLabel("Risorse per ruolo")
         roles_title.setObjectName("subSectionTitle")
         layout.addWidget(roles_title)
-    
+
         self.info_roles_container = QWidget()
         self.info_roles_layout = QVBoxLayout(self.info_roles_container)
         self.info_roles_layout.setContentsMargins(0, 0, 0, 0)
-        self.info_roles_layout.setSpacing(8)
+        self.info_roles_layout.setSpacing(10)
         empty_roles = QLabel("Nessuna risorsa collegata.")
         empty_roles.setObjectName("subText")
         self.info_roles_layout.addWidget(empty_roles)
         self.info_roles_layout.addStretch()
-    
+
         roles_scroll = QScrollArea()
         roles_scroll.setWidgetResizable(True)
         roles_scroll.setFrameShape(QFrame.Shape.NoFrame)
         roles_scroll.setWidget(self.info_roles_container)
         layout.addWidget(roles_scroll, 1)
-    
-        products_title = QLabel("Prodotti collegati")
-        products_title.setObjectName("subSectionTitle")
-        layout.addWidget(products_title)
-    
-        self.info_products_area = QLabel(
-            "Area dedicata ai prodotti collegati. Le regole saranno implementate nel prossimo step."
-        )
-        self.info_products_area.setObjectName("hintCard")
-        self.info_products_area.setWordWrap(True)
-        layout.addWidget(self.info_products_area)
+
+        self._client_info_website_href = ""
+        self._favicon_gen = 0
+        self._favicon_reply: QNetworkReply | None = None
         return page
     
 
@@ -716,26 +905,34 @@ class ClientsMixin:
         key_lbl.setObjectName("infoKey")
         value_lbl = QLabel("-")
         value_lbl.setObjectName("infoValue")
+        value_lbl.setWordWrap(True)
         layout.addWidget(key_lbl, row, 0)
         layout.addWidget(value_lbl, row, 1)
         return value_lbl
     
-    @staticmethod
-
     def _add_vpn_card_item(
-        layout: QGridLayout, row: int, col: int, label: str, col_span: int = 1
-    ) -> QLineEdit:
+        self,
+        layout: QGridLayout,
+        row: int,
+        col: int,
+        label: str,
+        col_span: int = 1,
+    ) -> _CopyOnDoubleClickLineEdit:
         container = QWidget()
         vbox = QVBoxLayout(container)
         vbox.setContentsMargins(0, 0, 0, 0)
         vbox.setSpacing(4)
     
         key_lbl = QLabel(label)
-        key_lbl.setObjectName("infoKey")
-        value_edit = QLineEdit("-")
-        value_edit.setObjectName("copyField")
+        key_lbl.setObjectName("accessVpnFieldLabel")
+        value_edit = _CopyOnDoubleClickLineEdit(
+            "-",
+            on_copied=lambda t, lbl=label: self._show_access_copy_feedback(lbl, t),
+        )
+        value_edit.setObjectName("accessVpnCopyField")
         value_edit.setReadOnly(True)
         value_edit.setCursorPosition(0)
+        value_edit.setToolTip("Doppio clic per copiare")
         vbox.addWidget(key_lbl)
         vbox.addWidget(value_edit)
         layout.addWidget(container, row, col, 1, col_span)
@@ -744,109 +941,134 @@ class ClientsMixin:
 
     def _build_client_access_tab(self) -> QWidget:
         page = QWidget()
+        page.setObjectName("clientAccessTabPage")
+        page.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(8)
-    
-        # Collapsible VPN section to free vertical space for credentials
-        vpn_header = QHBoxLayout()
-        vpn_header.setContentsMargins(0, 0, 0, 0)
-        vpn_header.setSpacing(6)
-    
-        self.vpn_toggle_btn = QToolButton()
-        self.vpn_toggle_btn.setText("VPN associata")
-        self.vpn_toggle_btn.setCheckable(True)
-        self.vpn_toggle_btn.setChecked(False)  # collapsed by default
-        self.vpn_toggle_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        self.vpn_toggle_btn.setArrowType(Qt.ArrowType.RightArrow)
-        self.vpn_toggle_btn.setObjectName("vpnToggle")
-        self.vpn_toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.vpn_toggle_btn.setAutoRaise(True)
-        vpn_header.addWidget(self.vpn_toggle_btn, alignment=Qt.AlignmentFlag.AlignLeft)
-        vpn_header.addStretch()
-        layout.addLayout(vpn_header)
-    
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(16)
+
+        self.access_vpn_card = QFrame()
+        self.access_vpn_card.setObjectName("accessVpnCard")
+        self.access_vpn_card.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.access_vpn_card.setMinimumWidth(300)
+        self.access_vpn_card.setMaximumWidth(440)
+        self.access_vpn_card.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.MinimumExpanding
+        )
+        vpn_outer = QVBoxLayout(self.access_vpn_card)
+        vpn_outer.setContentsMargins(0, 0, 0, 0)
+        vpn_outer.setSpacing(0)
+
+        vpn_head = QFrame()
+        vpn_head.setObjectName("clientInfoCardHeader")
+        head_lay = QHBoxLayout(vpn_head)
+        head_lay.setContentsMargins(12, 10, 14, 10)
+        head_lay.setSpacing(8)
+        vpn_icon = QLabel("🔐")
+        vpn_icon.setObjectName("clientInfoCardHeaderIcon")
+        vpn_title = QLabel("Connessione VPN")
+        vpn_title.setObjectName("clientInfoCardHeaderTitle")
+        head_lay.addWidget(vpn_icon, alignment=Qt.AlignmentFlag.AlignVCenter)
+        head_lay.addWidget(vpn_title, 1, alignment=Qt.AlignmentFlag.AlignVCenter)
+        vpn_outer.addWidget(vpn_head)
+
         self.vpn_section = QWidget()
+        self.vpn_section.setObjectName("accessVpnBody")
         vpn_section_layout = QVBoxLayout(self.vpn_section)
-        vpn_section_layout.setContentsMargins(0, 0, 0, 0)
-        vpn_section_layout.setSpacing(8)
-    
-        self.vpn_card = QFrame()
-        self.vpn_card.setObjectName("vpnCard")
-        vpn_card_layout = QGridLayout(self.vpn_card)
-        vpn_card_layout.setContentsMargins(12, 10, 12, 10)
-        vpn_card_layout.setHorizontalSpacing(14)
-        vpn_card_layout.setVerticalSpacing(8)
-    
-        self.vpn_name_field = self._add_vpn_card_item(vpn_card_layout, 0, 0, "Nome Connessione")
+        vpn_section_layout.setContentsMargins(12, 12, 12, 12)
+        vpn_section_layout.setSpacing(12)
+
+        vpn_card_layout = QGridLayout()
+        vpn_card_layout.setContentsMargins(0, 0, 0, 0)
+        vpn_card_layout.setHorizontalSpacing(12)
+        vpn_card_layout.setVerticalSpacing(10)
+
+        self.vpn_name_field = self._add_vpn_card_item(vpn_card_layout, 0, 0, "Nome connessione")
         self.vpn_server_field = self._add_vpn_card_item(vpn_card_layout, 0, 1, "Server")
-        self.vpn_type_field = self._add_vpn_card_item(vpn_card_layout, 0, 2, "Tipo VPN")
-        self.vpn_access_info_field = self._add_vpn_card_item(vpn_card_layout, 1, 0, "Info Accesso")
-        self.vpn_user_field = self._add_vpn_card_item(vpn_card_layout, 1, 1, "Utente")
-        self.vpn_password_field = self._add_vpn_card_item(vpn_card_layout, 1, 2, "Password")
-        self.vpn_path_field = self._add_vpn_card_item(vpn_card_layout, 2, 0, "Percorso VPN", col_span=3)
-        vpn_section_layout.addWidget(self.vpn_card)
-    
-        self.vpn_connect_btn = QPushButton("Connetti")
-        self.vpn_connect_btn.setObjectName("accessActionButton")
+        self.vpn_type_field = self._add_vpn_card_item(vpn_card_layout, 1, 0, "Tipo VPN")
+        self.vpn_access_info_field = self._add_vpn_card_item(vpn_card_layout, 1, 1, "Info accesso")
+        self.vpn_user_field = self._add_vpn_card_item(vpn_card_layout, 2, 0, "Utente")
+        self.vpn_password_field = self._add_vpn_card_item(vpn_card_layout, 2, 1, "Password")
+        self.vpn_path_field = self._add_vpn_card_item(
+            vpn_card_layout, 3, 0, "Percorso VPN", col_span=2
+        )
+        vpn_section_layout.addLayout(vpn_card_layout)
+
+        self.vpn_connect_btn = QPushButton("Connetti / Avvia")
+        self.vpn_connect_btn.setObjectName("vpnConnectButton")
         self.vpn_connect_btn.setEnabled(False)
         self.vpn_connect_btn.clicked.connect(self._connect_vpn_action)
-        self.vpn_connect_btn.setFixedWidth(140)
+        self.vpn_connect_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.vpn_connect_btn.setSizePolicy(
+            QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed
+        )
         vpn_section_layout.addWidget(self.vpn_connect_btn, alignment=Qt.AlignmentFlag.AlignLeft)
-    
-        self.vpn_section.setVisible(False)
-        layout.addWidget(self.vpn_section)
-    
-        def _toggle_vpn_section(expanded: bool) -> None:
-            self.vpn_section.setVisible(expanded)
-            self.vpn_toggle_btn.setArrowType(
-                Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow
-            )
-    
-        self.vpn_toggle_btn.toggled.connect(_toggle_vpn_section)
-    
-        cred_title = QLabel("Credenziali Prodotto")
-        cred_title.setObjectName("subSectionTitle")
-        layout.addWidget(cred_title)
-    
+
+        vpn_outer.addWidget(self.vpn_section)
+
+        cred_card = QFrame()
+        cred_card.setObjectName("accessCredentialCard")
+        cred_card.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        cred_card.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.MinimumExpanding
+        )
+        cred_l = QVBoxLayout(cred_card)
+        cred_l.setContentsMargins(0, 0, 0, 0)
+        cred_l.setSpacing(0)
+        cred_l.addWidget(self._client_info_card_header("🔑", "Credenziali prodotto"))
+
+        cred_body = QWidget()
+        cred_body.setObjectName("accessCredentialBody")
+        cred_body_l = QVBoxLayout(cred_body)
+        cred_body_l.setContentsMargins(14, 14, 14, 14)
+        cred_body_l.setSpacing(12)
+
         self.access_product_label = QLabel("Seleziona un prodotto nella lista clienti.")
-        self.access_product_label.setObjectName("subText")
+        self.access_product_label.setObjectName("accessProductHint")
+        self.access_product_label.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.access_product_label.setWordWrap(True)
-        layout.addWidget(self.access_product_label)
-    
-        action_bar = QHBoxLayout()
+        cred_body_l.addWidget(self.access_product_label)
+
+        action_bar_wrap = QFrame()
+        action_bar_wrap.setObjectName("accessCredActionBar")
+        action_bar = QHBoxLayout(action_bar_wrap)
+        action_bar.setContentsMargins(10, 8, 10, 8)
         action_bar.setSpacing(8)
-        self.connect_rdp_ip_btn = QPushButton("Connetti RDP (IP)")
-        self.connect_rdp_ip_btn.setObjectName("accessActionButton")
+        self.connect_rdp_ip_btn = QPushButton("RDP (IP)")
+        self.connect_rdp_ip_btn.setObjectName("accessCredBtnRdpIp")
+        self.connect_rdp_ip_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.connect_rdp_ip_btn.setEnabled(False)
         self.connect_rdp_ip_btn.clicked.connect(partial(self._run_selected_credential_action, "ip"))
         action_bar.addWidget(self.connect_rdp_ip_btn)
-    
-        self.connect_rdp_host_btn = QPushButton("Connetti RDP (HOST)")
-        self.connect_rdp_host_btn.setObjectName("accessActionButton")
+
+        self.connect_rdp_host_btn = QPushButton("RDP (HOST)")
+        self.connect_rdp_host_btn.setObjectName("accessCredBtnRdpHost")
+        self.connect_rdp_host_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.connect_rdp_host_btn.setEnabled(False)
         self.connect_rdp_host_btn.clicked.connect(
             partial(self._run_selected_credential_action, "host")
         )
         action_bar.addWidget(self.connect_rdp_host_btn)
-    
-        self.open_url_btn = QPushButton("Apri Link")
-        self.open_url_btn.setObjectName("accessActionButton")
+
+        self.open_url_btn = QPushButton("Apri URL")
+        self.open_url_btn.setObjectName("accessCredBtnUrl")
+        self.open_url_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.open_url_btn.setEnabled(False)
         self.open_url_btn.clicked.connect(partial(self._run_selected_credential_action, "url"))
         action_bar.addWidget(self.open_url_btn)
-    
-        self.connect_rdp_conf_btn = QPushButton("Connetti RDP conf")
-        self.connect_rdp_conf_btn.setObjectName("accessActionButton")
+
+        self.connect_rdp_conf_btn = QPushButton("RDP preconfig.")
+        self.connect_rdp_conf_btn.setObjectName("accessCredBtnRdpConf")
+        self.connect_rdp_conf_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.connect_rdp_conf_btn.setEnabled(False)
         self.connect_rdp_conf_btn.clicked.connect(
             partial(self._run_selected_credential_action, "rdp_path")
         )
         action_bar.addWidget(self.connect_rdp_conf_btn)
-    
+
         action_bar.addStretch()
-        layout.addLayout(action_bar)
-    
+        cred_body_l.addWidget(action_bar_wrap)
+
         self.access_endpoint_columns: list[tuple[str, str]] = [
             ("ip", "IP"),
             ("host", "HOST"),
@@ -854,14 +1076,16 @@ class ClientsMixin:
             ("rdp_path", "RDP PreConfigurata"),
         ]
         self.access_credentials_columns: list[str] = []
-    
+
         self.access_credentials_table = QTableWidget(0, 0)
+        self.access_credentials_table.setObjectName("accessCredentialsTable")
         self.access_credentials_table.verticalHeader().setVisible(False)
         self.access_credentials_table.setSelectionBehavior(
             QTableWidget.SelectionBehavior.SelectRows
         )
         self.access_credentials_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.access_credentials_table.setAlternatingRowColors(True)
+        self.access_credentials_table.setShowGrid(False)
         self.access_credentials_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.access_credentials_table.customContextMenuRequested.connect(
             self._on_access_credentials_menu
@@ -869,49 +1093,98 @@ class ClientsMixin:
         self.access_credentials_table.itemSelectionChanged.connect(
             self._update_access_credentials_actions
         )
+        self.access_credentials_table.cellDoubleClicked.connect(
+            self._on_access_credentials_cell_double_clicked
+        )
+        self.access_credentials_table.setToolTip(
+            "Doppio clic su IP, URL, Host, RDP preconfigurata, Username o Password per copiare."
+        )
         self._configure_access_credentials_columns([])
-        layout.addWidget(self.access_credentials_table, 1)
-    
+
+        table_wrap = QFrame()
+        table_wrap.setObjectName("accessCredTableWrap")
+        tw_l = QVBoxLayout(table_wrap)
+        tw_l.setContentsMargins(0, 0, 0, 0)
+        tw_l.setSpacing(0)
+        tw_l.addWidget(self.access_credentials_table, 1)
+        cred_body_l.addWidget(table_wrap, 1)
+
+        self.access_copy_feedback_lbl = QLabel("")
+        self.access_copy_feedback_lbl.setObjectName("accessCopyFeedback")
+        self.access_copy_feedback_lbl.setWordWrap(True)
+        self.access_copy_feedback_lbl.setMinimumHeight(22)
+        cred_body_l.addWidget(self.access_copy_feedback_lbl)
+        self._access_copy_feedback_timer = QTimer(self)
+        self._access_copy_feedback_timer.setSingleShot(True)
+        self._access_copy_feedback_timer.timeout.connect(self._clear_access_copy_feedback)
+
         actions = QHBoxLayout()
+        actions.setSpacing(10)
         actions.addStretch()
         self.edit_credential_btn = QPushButton("Modifica")
-        self.edit_credential_btn.setObjectName("primaryActionButton")
+        self.edit_credential_btn.setObjectName("accessEditCredentialButton")
+        self.edit_credential_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.edit_credential_btn.setEnabled(False)
         self.edit_credential_btn.clicked.connect(self._edit_selected_credential)
         actions.addWidget(self.edit_credential_btn)
-    
+
         self.delete_credential_btn = QPushButton("Elimina")
-        self.delete_credential_btn.setObjectName("dangerActionButton")
+        self.delete_credential_btn.setObjectName("accessDeleteCredentialButton")
+        self.delete_credential_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.delete_credential_btn.setEnabled(False)
         self.delete_credential_btn.clicked.connect(self._delete_selected_credential)
         actions.addWidget(self.delete_credential_btn)
-        layout.addLayout(actions)
+        cred_body_l.addLayout(actions)
+
+        cred_l.addWidget(cred_body, 1)
+
+        access_row = QHBoxLayout()
+        access_row.setSpacing(14)
+        access_row.addWidget(self.access_vpn_card, 0, Qt.AlignmentFlag.AlignTop)
+        access_row.addWidget(cred_card, 1)
+        layout.addLayout(access_row, 1)
         return page
     
 
     def _build_client_archive_tab(self) -> QWidget:
         page = QWidget()
+        page.setObjectName("clientArchiveTabPage")
+        page.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(8)
-    
-        title = QLabel("Archivio Cliente")
-        title.setObjectName("subSectionTitle")
-        layout.addWidget(title)
-    
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(16)
+
+        summary_card = QFrame()
+        summary_card.setObjectName("clientDashboardCard")
+        summary_card.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        sc_l = QVBoxLayout(summary_card)
+        sc_l.setContentsMargins(0, 0, 0, 0)
+        sc_l.setSpacing(0)
+        sc_l.addWidget(self._client_info_card_header("📊", "Riepilogo"))
+        summary_body = QWidget()
+        summary_body_l = QVBoxLayout(summary_body)
+        summary_body_l.setContentsMargins(14, 14, 14, 14)
         stats_grid = QGridLayout()
         stats_grid.setHorizontalSpacing(16)
         stats_grid.setVerticalSpacing(8)
-    
-        self.client_files_count = self._add_info_row(stats_grid, 0, "Totale File")
-        self.client_links_count = self._add_info_row(stats_grid, 1, "Totale Link")
-        layout.addLayout(stats_grid)
-    
-        docs_title = QLabel("Documenti cliente (Tag)")
-        docs_title.setObjectName("subSectionTitle")
-        layout.addWidget(docs_title)
-    
+        self.client_files_count = self._add_info_row(stats_grid, 0, "Totale file")
+        self.client_links_count = self._add_info_row(stats_grid, 1, "Totale link")
+        summary_body_l.addLayout(stats_grid)
+        sc_l.addWidget(summary_body)
+        layout.addWidget(summary_card)
+
+        files_card = QFrame()
+        files_card.setObjectName("clientDashboardCard")
+        files_card.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        fc_l = QVBoxLayout(files_card)
+        fc_l.setContentsMargins(0, 0, 0, 0)
+        fc_l.setSpacing(0)
+        fc_l.addWidget(self._client_info_card_header("📁", "Documenti — file"))
+        files_body = QWidget()
+        files_body_l = QVBoxLayout(files_body)
+        files_body_l.setContentsMargins(14, 14, 14, 14)
         self.client_docs_files_table = QTableWidget(0, 2)
+        self.client_docs_files_table.setObjectName("clientArchiveFilesTable")
         self.client_docs_files_table.setHorizontalHeaderLabels(["Nome", "Percorso"])
         self.client_docs_files_table.verticalHeader().setVisible(False)
         self.client_docs_files_table.setSelectionBehavior(
@@ -919,6 +1192,7 @@ class ClientsMixin:
         )
         self.client_docs_files_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.client_docs_files_table.setAlternatingRowColors(True)
+        self.client_docs_files_table.setShowGrid(False)
         self.client_docs_files_table.setColumnWidth(0, 260)
         self.client_docs_files_table.horizontalHeader().setStretchLastSection(True)
         self.client_docs_files_table.cellDoubleClicked.connect(
@@ -928,9 +1202,27 @@ class ClientsMixin:
         self.client_docs_files_table.customContextMenuRequested.connect(
             self._on_client_docs_files_menu
         )
-        layout.addWidget(self.client_docs_files_table, 1)
-    
+        files_wrap = QFrame()
+        files_wrap.setObjectName("clientDashboardTableWrap")
+        fw_l = QVBoxLayout(files_wrap)
+        fw_l.setContentsMargins(0, 0, 0, 0)
+        fw_l.addWidget(self.client_docs_files_table, 1)
+        files_body_l.addWidget(files_wrap, 1)
+        fc_l.addWidget(files_body, 1)
+        layout.addWidget(files_card, 1)
+
+        links_card = QFrame()
+        links_card.setObjectName("clientDashboardCard")
+        links_card.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        lc_l = QVBoxLayout(links_card)
+        lc_l.setContentsMargins(0, 0, 0, 0)
+        lc_l.setSpacing(0)
+        lc_l.addWidget(self._client_info_card_header("🔗", "Documenti — link"))
+        links_body = QWidget()
+        links_body_l = QVBoxLayout(links_body)
+        links_body_l.setContentsMargins(14, 14, 14, 14)
         self.client_docs_links_table = QTableWidget(0, 2)
+        self.client_docs_links_table.setObjectName("clientArchiveLinksTable")
         self.client_docs_links_table.setHorizontalHeaderLabels(["Nome", "URL"])
         self.client_docs_links_table.verticalHeader().setVisible(False)
         self.client_docs_links_table.setSelectionBehavior(
@@ -938,6 +1230,7 @@ class ClientsMixin:
         )
         self.client_docs_links_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.client_docs_links_table.setAlternatingRowColors(True)
+        self.client_docs_links_table.setShowGrid(False)
         self.client_docs_links_table.setColumnWidth(0, 260)
         self.client_docs_links_table.horizontalHeader().setStretchLastSection(True)
         self.client_docs_links_table.cellDoubleClicked.connect(
@@ -947,35 +1240,61 @@ class ClientsMixin:
         self.client_docs_links_table.customContextMenuRequested.connect(
             self._on_client_docs_links_menu
         )
-        layout.addWidget(self.client_docs_links_table, 1)
+        links_wrap = QFrame()
+        links_wrap.setObjectName("clientDashboardTableWrap")
+        lw_l = QVBoxLayout(links_wrap)
+        lw_l.setContentsMargins(0, 0, 0, 0)
+        lw_l.addWidget(self.client_docs_links_table, 1)
+        links_body_l.addWidget(links_wrap, 1)
+        lc_l.addWidget(links_body, 1)
+        layout.addWidget(links_card, 1)
         return page
-    
 
     def _build_client_contacts_tab(self) -> QWidget:
         page = QWidget()
+        page.setObjectName("clientContactsTabPage")
+        page.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(8)
-    
-        title = QLabel("Rubrica Cliente")
-        title.setObjectName("subSectionTitle")
-        layout.addWidget(title)
-    
-        actions = QHBoxLayout()
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(16)
+
+        card = QFrame()
+        card.setObjectName("clientDashboardCard")
+        card.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.MinimumExpanding)
+        card_l = QVBoxLayout(card)
+        card_l.setContentsMargins(0, 0, 0, 0)
+        card_l.setSpacing(0)
+        card_l.addWidget(self._client_info_card_header("👥", "Rubrica"))
+        body = QWidget()
+        body_l = QVBoxLayout(body)
+        body_l.setContentsMargins(14, 14, 14, 14)
+        body_l.setSpacing(12)
+
+        action_bar = QFrame()
+        action_bar.setObjectName("accessCredActionBar")
+        actions = QHBoxLayout(action_bar)
+        actions.setContentsMargins(10, 8, 10, 8)
+        actions.setSpacing(8)
         actions.addStretch()
         self.contacts_add_btn = QPushButton("Nuovo contatto")
         self.contacts_edit_btn = QPushButton("Modifica")
         self.contacts_delete_btn = QPushButton("Elimina")
         self.contacts_add_btn.setObjectName("primaryActionButton")
-        self.contacts_delete_btn.setObjectName("dangerActionButton")
+        self.contacts_add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.contacts_edit_btn.setObjectName("clientFormSecondaryButton")
+        self.contacts_edit_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.contacts_delete_btn.setObjectName("contactsDeleteButton")
+        self.contacts_delete_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.contacts_edit_btn.setEnabled(False)
         self.contacts_delete_btn.setEnabled(False)
         actions.addWidget(self.contacts_add_btn)
         actions.addWidget(self.contacts_edit_btn)
         actions.addWidget(self.contacts_delete_btn)
-        layout.addLayout(actions)
-    
+        body_l.addWidget(action_bar)
+
         self.contacts_table = QTableWidget(0, 6)
+        self.contacts_table.setObjectName("contactsTable")
         self.contacts_table.setHorizontalHeaderLabels(
             ["Nome", "Telefono", "Cellulare", "Mail", "Ruolo", "Note"]
         )
@@ -983,6 +1302,7 @@ class ClientsMixin:
         self.contacts_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.contacts_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.contacts_table.setAlternatingRowColors(True)
+        self.contacts_table.setShowGrid(False)
         self.contacts_table.setColumnWidth(0, 200)
         self.contacts_table.setColumnWidth(1, 140)
         self.contacts_table.setColumnWidth(2, 140)
@@ -995,8 +1315,16 @@ class ClientsMixin:
         self.contacts_table.cellClicked.connect(self._handle_contact_cell_click)
         self.contacts_table.cellDoubleClicked.connect(self._handle_contact_cell_double_click)
         self.contacts_table.installEventFilter(self)
-        layout.addWidget(self.contacts_table, 1)
-    
+        table_wrap = QFrame()
+        table_wrap.setObjectName("clientDashboardTableWrap")
+        tw_l = QVBoxLayout(table_wrap)
+        tw_l.setContentsMargins(0, 0, 0, 0)
+        tw_l.addWidget(self.contacts_table, 1)
+        body_l.addWidget(table_wrap, 1)
+
+        card_l.addWidget(body, 1)
+        layout.addWidget(card, 1)
+
         self.contacts_add_btn.clicked.connect(self._add_contact)
         self.contacts_edit_btn.clicked.connect(self._edit_contact)
         self.contacts_delete_btn.clicked.connect(self._delete_contact)
@@ -1004,20 +1332,34 @@ class ClientsMixin:
 
     def _build_client_notes_tab(self) -> QWidget:
         page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(8)
+        page.setObjectName("clientNotesTabPage")
+        page.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(16, 16, 16, 16)
+        outer.setSpacing(0)
 
-        title = QLabel("Note Cliente")
-        title.setObjectName("subSectionTitle")
-        layout.addWidget(title)
+        notes_card = QFrame()
+        notes_card.setObjectName("clientDashboardCard")
+        notes_card.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        notes_card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.MinimumExpanding)
+        nc_l = QVBoxLayout(notes_card)
+        nc_l.setContentsMargins(0, 0, 0, 0)
+        nc_l.setSpacing(0)
+        nc_l.addWidget(self._client_info_card_header("📝", "Note cliente"))
+
+        card_body = QWidget()
+        layout = QVBoxLayout(card_body)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(12)
 
         main_h = QHBoxLayout()
         main_h.setSpacing(16)
 
         btn_column = QVBoxLayout()
-        btn_column.setSpacing(6)
-        btn_column.addWidget(QLabel("Lista note:"))
+        btn_column.setSpacing(8)
+        list_lbl = QLabel("Lista note")
+        list_lbl.setObjectName("subText")
+        btn_column.addWidget(list_lbl)
         self.notes_list_combo = QComboBox()
         self.notes_list_combo.setMinimumWidth(180)
         self.notes_list_combo.currentIndexChanged.connect(self._on_notes_list_selected)
@@ -1025,62 +1367,83 @@ class ClientsMixin:
 
         self.notes_save_btn = QPushButton("Salva nella lista")
         self.notes_save_btn.setObjectName("primaryActionButton")
+        self.notes_save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.notes_save_btn.clicked.connect(self._save_note_to_list)
         btn_column.addWidget(self.notes_save_btn)
 
         self.notes_export_btn = QPushButton("Salva in file e archivio")
         self.notes_export_btn.setObjectName("archiveActionButton")
+        self.notes_export_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.notes_export_btn.clicked.connect(self._export_note_to_file_and_archive)
         btn_column.addWidget(self.notes_export_btn)
 
         self.notes_add_row_btn = QPushButton("Aggiungi riga")
+        self.notes_add_row_btn.setObjectName("clientCompactButton")
+        self.notes_add_row_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.notes_add_row_btn.clicked.connect(self._notes_add_row)
         btn_column.addWidget(self.notes_add_row_btn)
 
         self.notes_clear_btn = QPushButton("Pulisci foglio")
+        self.notes_clear_btn.setObjectName("clientCompactButton")
+        self.notes_clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.notes_clear_btn.clicked.connect(self._notes_clear_sheet)
         btn_column.addWidget(self.notes_clear_btn)
 
         self.notes_formulas_btn = QPushButton("Formule")
+        self.notes_formulas_btn.setObjectName("clientCompactButton")
+        self.notes_formulas_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.notes_formulas_btn.clicked.connect(self._open_notes_formulas_dialog)
         btn_column.addWidget(self.notes_formulas_btn)
 
         self.notes_undo_btn = QPushButton("Annulla (Ctrl+Z)")
+        self.notes_undo_btn.setObjectName("clientCompactButton")
+        self.notes_undo_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.notes_undo_btn.clicked.connect(self._notes_undo)
         self.notes_undo_btn.setEnabled(False)
         btn_column.addWidget(self.notes_undo_btn)
         self.notes_redo_btn = QPushButton("Ripristina (Ctrl+Y)")
+        self.notes_redo_btn.setObjectName("clientCompactButton")
+        self.notes_redo_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.notes_redo_btn.clicked.connect(self._notes_redo)
         self.notes_redo_btn.setEnabled(False)
         btn_column.addWidget(self.notes_redo_btn)
 
         self.notes_new_btn = QPushButton("Nuova nota")
+        self.notes_new_btn.setObjectName("clientCompactButton")
+        self.notes_new_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.notes_new_btn.clicked.connect(self._new_note)
         btn_column.addWidget(self.notes_new_btn)
 
         self.notes_delete_btn = QPushButton("Elimina")
-        self.notes_delete_btn.setObjectName("dangerActionButton")
+        self.notes_delete_btn.setObjectName("notesDeleteButton")
+        self.notes_delete_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.notes_delete_btn.clicked.connect(self._delete_selected_note)
         btn_column.addWidget(self.notes_delete_btn)
 
         btn_column.addStretch()
         btn_widget = QWidget()
+        btn_widget.setObjectName("clientNotesSidebar")
+        btn_widget.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         btn_widget.setMaximumWidth(220)
+        btn_column.setContentsMargins(10, 10, 10, 10)
         btn_widget.setLayout(btn_column)
         main_h.addWidget(btn_widget)
 
         content_column = QVBoxLayout()
-        content_column.setSpacing(6)
+        content_column.setSpacing(8)
         self.notes_title_edit = QLineEdit()
         self.notes_title_edit.setPlaceholderText("Titolo nota...")
+        self.notes_title_edit.setObjectName("notesTitleEdit")
         content_column.addWidget(self.notes_title_edit)
 
         self.notes_tabs = QTabWidget()
+        self.notes_tabs.setObjectName("clientNotesTabWidget")
         self.notes_text_edit = QPlainTextEdit()
         self.notes_text_edit.setPlaceholderText("Scrivi qui il testo della nota...")
         self.notes_tabs.addTab(self.notes_text_edit, "Testo")
 
         self.notes_table = QTableWidget(0, 4)
+        self.notes_table.setObjectName("notesSpreadsheetTable")
         self._notes_undo_stack: list[str] = []
         self._notes_redo_stack: list[str] = []
         self._notes_restoring = False
@@ -1088,6 +1451,7 @@ class ClientsMixin:
         self.notes_table.setItemDelegate(_NotesTableCellDelegate(self.notes_table, self._notes_snapshot))
         self._notes_apply_excel_headers()
         self.notes_table.setAlternatingRowColors(True)
+        self.notes_table.setShowGrid(False)
         self.notes_table.horizontalHeader().setStretchLastSection(True)
         self.notes_table.setEditTriggers(
             QTableWidget.EditTrigger.DoubleClicked
@@ -1117,13 +1481,19 @@ class ClientsMixin:
         cell_section_layout.addWidget(self.notes_cell_preview)
         cell_preview_actions = QHBoxLayout()
         self.notes_cell_clear_btn = QPushButton("Elimina contenuto")
-        self.notes_cell_clear_btn.setObjectName("dangerActionButton")
+        self.notes_cell_clear_btn.setObjectName("notesCellClearButton")
+        self.notes_cell_clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.notes_cell_clear_btn.clicked.connect(self._notes_clear_selected_cells)
         cell_preview_actions.addWidget(self.notes_cell_clear_btn)
         cell_preview_actions.addStretch()
         cell_section_layout.addLayout(cell_preview_actions)
         tabella_layout.addWidget(cell_section)
-        tabella_layout.addWidget(self.notes_table, 1)
+        notes_table_wrap = QFrame()
+        notes_table_wrap.setObjectName("clientDashboardTableWrap")
+        ntw_l = QVBoxLayout(notes_table_wrap)
+        ntw_l.setContentsMargins(0, 0, 0, 0)
+        ntw_l.addWidget(self.notes_table, 1)
+        tabella_layout.addWidget(notes_table_wrap, 1)
         self.notes_tabs.addTab(tabella_widget, "Tabella")
         self._notes_cell_preview_block = False
 
@@ -1132,6 +1502,9 @@ class ClientsMixin:
         content_widget.setLayout(content_column)
         main_h.addWidget(content_widget, 1)
         layout.addLayout(main_h)
+
+        nc_l.addWidget(card_body, 1)
+        outer.addWidget(notes_card, 1)
 
         self.notes_table.installEventFilter(self)
         self.notes_cell_preview.installEventFilter(self)
@@ -1976,7 +2349,15 @@ class ClientsMixin:
             if hasattr(self.repository, "credentials")
             else self.repository.get_product_type_flags_for_product(int(product_id))
         )
-        dialog = CredentialDialog(self.repository, client, product, flags, parent=self)
+        suggestion = self._credential_suggestion_for_product(int(client_id), int(product_id))
+        dialog = CredentialDialog(
+            self.repository,
+            client,
+            product,
+            flags,
+            credential_suggestion=suggestion,
+            parent=self,
+        )
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.refresh_views()
 
@@ -2021,6 +2402,45 @@ class ClientsMixin:
             lambda: self._add_favorite("link", int(match["id"])),
         )
         menu.exec(self.client_docs_links_table.mapToGlobal(pos))
+
+    @staticmethod
+    def _copy_display_value_to_clipboard(raw: str) -> str | None:
+        text = str(raw or "").strip()
+        if not text or text == "-":
+            return None
+        QGuiApplication.clipboard().setText(text)
+        return text
+
+    def _show_access_copy_feedback(self, field_label: str, value: str) -> None:
+        if not hasattr(self, "access_copy_feedback_lbl"):
+            return
+        safe = str(value).replace("\n", " ").replace("\r", "")
+        if len(safe) > 240:
+            safe = safe[:240] + "…"
+        self.access_copy_feedback_lbl.setText(f"Copiato ({field_label}): {safe}")
+        if getattr(self, "_access_copy_feedback_timer", None) is not None:
+            self._access_copy_feedback_timer.stop()
+            self._access_copy_feedback_timer.start(5000)
+
+    def _clear_access_copy_feedback(self) -> None:
+        if hasattr(self, "access_copy_feedback_lbl"):
+            self.access_copy_feedback_lbl.clear()
+
+    def _on_access_credentials_cell_double_clicked(self, row: int, col: int) -> None:
+        cols = getattr(self, "access_credentials_columns", None) or []
+        if col < 0 or col >= len(cols):
+            return
+        if cols[col] not in _ACCESS_CREDENTIAL_COPY_KEYS:
+            return
+        item = self.access_credentials_table.item(row, col)
+        if item is None:
+            return
+        copied = self._copy_display_value_to_clipboard(item.text())
+        if copied is None:
+            return
+        header = self.access_credentials_table.horizontalHeaderItem(col)
+        label = header.text().strip() if header is not None else cols[col]
+        self._show_access_copy_feedback(label, copied)
 
     def _on_access_credentials_menu(self, position) -> None:
         item = self.access_credentials_table.itemAt(position)
@@ -2121,6 +2541,27 @@ class ClientsMixin:
             if int(row.get("id", -1)) == int(cred_id):
                 return row
         return None
+
+    def _credential_suggestion_for_product(self, client_id: int, product_id: int) -> dict | None:
+        """Dominio/IP dall'ultima credenziale dello stesso cliente+prodotto (solo suggerimento in nuova credenziale)."""
+        try:
+            if hasattr(self.repository, "credentials"):
+                rows = self.repository.credentials.list_product_credentials(
+                    int(client_id), int(product_id)
+                )
+            else:
+                rows = self.repository.list_product_credentials(int(client_id), int(product_id))
+        except (TypeError, ValueError):
+            return None
+        if not rows:
+            return None
+        last = rows[0]
+        domain = str(last.get("domain") or "").strip()
+        ip = str(last.get("ip") or "").strip()
+        host = str(last.get("host") or "").strip()
+        if not domain and not ip and not host:
+            return None
+        return {"domain": domain, "ip": ip, "host": host}
     
 
     def _run_selected_credential_action(self, action_key: str) -> None:
@@ -2580,22 +3021,313 @@ class ClientsMixin:
             )
     
 
+    @staticmethod
+    def _tel_href_from_display(phone: str) -> str:
+        raw = "".join(ch for ch in phone if ch.isdigit() or ch == "+")
+        return f"tel:{raw}" if raw else ""
+
+    @staticmethod
+    def _unavatar_linkedin_photo_url(href: str) -> str | None:
+        if not href:
+            return None
+        path = (urlparse(href.strip()).path or "").lower()
+        if "/in/" not in path:
+            return None
+        idx = path.index("/in/")
+        slug = path[idx + 4 :].strip("/").split("/")[0]
+        if not slug:
+            return None
+        slug = unquote(slug)
+        return f"https://unavatar.io/linkedin.com/in/{quote(slug, safe='')}"
+
+    @staticmethod
+    def _ui_avatar_url_fallback(full_name: str, size: int = 128) -> str:
+        clean = quote_plus((full_name or "?").strip() or "?")
+        return (
+            f"https://ui-avatars.com/api/?name={clean}&size={size}&background=0d9488&color=ffffff"
+            "&bold=true&format=png"
+        )
+
+    @staticmethod
+    def _normalize_image_url(raw: str) -> str:
+        s = (raw or "").strip()
+        if not s:
+            return ""
+        if s.startswith("//"):
+            return f"https:{s}"
+        low = s.lower()
+        if low.startswith("https://") or low.startswith("http://"):
+            return s
+        return f"https://{s}"
+
+    @staticmethod
+    def _circle_cover_pixmap(pix: QPixmap, diameter: int) -> QPixmap:
+        tw = th = diameter
+        scaled = pix.scaled(
+            tw,
+            th,
+            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        x = max(0, (scaled.width() - tw) // 2)
+        y = max(0, (scaled.height() - th) // 2)
+        cropped = scaled.copy(x, y, tw, th)
+        out = QPixmap(tw, th)
+        out.fill(Qt.GlobalColor.transparent)
+        p = QPainter(out)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        path = QPainterPath()
+        path.addEllipse(QRectF(0, 0, tw, th))
+        p.setClipPath(path)
+        p.drawPixmap(0, 0, cropped)
+        p.end()
+        return out
+
+    @staticmethod
+    def _initials_placeholder_pixmap(
+        full_name: str,
+        diameter: int,
+        *,
+        fill: QColor | None = None,
+        pen: QColor | None = None,
+    ) -> QPixmap:
+        fill = fill or QColor("#0e7490")
+        pen = pen or QColor("#f0fdfa")
+        parts = [p for p in (full_name or "").split() if p]
+        initials = "".join(p[0] for p in parts[:2]).upper() or "?"
+        pm = QPixmap(diameter, diameter)
+        pm.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pm)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        path = QPainterPath()
+        path.addEllipse(QRectF(0, 0, diameter, diameter))
+        painter.fillPath(path, fill)
+        painter.setPen(pen)
+        fs = max(9, int(diameter * 0.34))
+        f = QFont("Segoe UI", fs, QFont.Weight.Bold)
+        painter.setFont(f)
+        painter.drawText(pm.rect(), Qt.AlignmentFlag.AlignCenter, initials)
+        painter.end()
+        return pm
+
+    def _apply_photo_pixmap(self, label: QLabel, pix: QPixmap, diameter: int) -> None:
+        final = self._circle_cover_pixmap(pix, diameter)
+        label.setPixmap(final)
+        label.setFixedSize(diameter, diameter)
+
+    def _resource_photo_start(self, photo_label: QLabel, resource: dict, full_name: str) -> None:
+        d = 80
+        fill = QColor(255, 255, 255, 55)
+        pen = QColor("#ffffff")
+        self._avatar_seq = getattr(self, "_avatar_seq", 0) + 1
+        req_id = self._avatar_seq
+        photo_label.setProperty("avatarReqId", req_id)
+
+        ph = self._initials_placeholder_pixmap(full_name, d, fill=fill, pen=pen)
+        photo_label.setPixmap(ph)
+        photo_label.setFixedSize(d, d)
+
+        urls: list[str] = []
+        manual = str(resource.get("photo_link", "") or "").strip()
+        if manual:
+            nu = self._normalize_image_url(manual)
+            if nu:
+                urls.append(nu)
+        linkedin = str(resource.get("linkedin", "") or "").strip()
+        href = self._resource_linkedin_href(linkedin) if linkedin else ""
+        u1 = self._unavatar_linkedin_photo_url(href) if href else None
+        if u1:
+            urls.append(u1)
+        urls.append(self._ui_avatar_url_fallback(full_name, max(128, d * 2)))
+
+        if not hasattr(self, "_avatar_nam"):
+            self._avatar_nam = QNetworkAccessManager(self)
+
+        def try_next(idx: int) -> None:
+            if idx >= len(urls):
+                pm = self._initials_placeholder_pixmap(
+                    full_name, d, fill=fill, pen=pen
+                )
+                if photo_label.property("avatarReqId") == req_id:
+                    photo_label.setPixmap(pm)
+                    photo_label.setFixedSize(d, d)
+                return
+            url = urls[idx]
+            req = QNetworkRequest(QUrl(url))
+            req.setRawHeader(
+                b"User-Agent",
+                b"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            )
+            reply = self._avatar_nam.get(req)
+
+            def _done() -> None:
+                reply.deleteLater()
+                if photo_label.property("avatarReqId") != req_id:
+                    return
+                if reply.error() != QNetworkReply.NetworkError.NoError:
+                    try_next(idx + 1)
+                    return
+                data = reply.readAll()
+                pix = QPixmap()
+                if not pix.loadFromData(data) or pix.isNull():
+                    try_next(idx + 1)
+                    return
+                self._apply_photo_pixmap(photo_label, pix, d)
+
+            reply.finished.connect(_done)
+
+        try_next(0)
+
+    @staticmethod
+    def _linkedin_display_url(href: str) -> str:
+        raw = (href or "").strip()
+        if not raw:
+            return ""
+        if "://" not in raw:
+            raw = f"https://{raw}"
+        u = urlparse(raw)
+        host = (u.netloc or "").lower()
+        path = (u.path or "").strip("/")
+        if "linkedin.com" in host:
+            return f"linkedin.com/{path}" if path else host
+        tail = raw.replace("https://", "").replace("http://", "")
+        return tail.split("?", 1)[0].rstrip("/")
+
+    def _resource_person_card(self, resource: dict) -> QWidget:
+        """Card orizzontale: avatar a sinistra, testo a destra (blu pieno, layout semplice)."""
+        full = f"{resource.get('name', '')} {resource.get('surname', '')}".strip()
+        if not full:
+            full = str(resource.get("name", "") or "-").strip() or "-"
+
+        card = QFrame()
+        card.setObjectName("resourcePersonCardH")
+        card.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        card.setFixedHeight(124)
+        card.setMinimumWidth(340)
+        card.setMaximumWidth(460)
+
+        root = QHBoxLayout(card)
+        root.setContentsMargins(16, 12, 16, 12)
+        root.setSpacing(16)
+
+        photo_lbl = QLabel()
+        photo_lbl.setObjectName("resourcePersonPhotoH")
+        photo_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._resource_photo_start(photo_lbl, resource, full)
+        root.addWidget(photo_lbl, alignment=Qt.AlignmentFlag.AlignVCenter)
+
+        right = QVBoxLayout()
+        right.setSpacing(3)
+        right.setContentsMargins(0, 0, 0, 0)
+
+        name_lbl = QLabel(full)
+        name_lbl.setObjectName("resourcePersonHName")
+        name_lbl.setWordWrap(True)
+        right.addWidget(name_lbl)
+
+        comp = str(resource.get("competence_name", "") or "").strip()
+        if comp:
+            comp_lbl = QLabel(comp)
+            comp_lbl.setObjectName("resourcePersonHCompetence")
+            comp_lbl.setWordWrap(True)
+            right.addWidget(comp_lbl)
+
+        email = str(resource.get("email", "") or "").strip()
+        if email:
+            safe_m = escape(email, quote=True)
+            safe_t = escape(email)
+            em = QLabel(
+                f'<a href="mailto:{safe_m}" style="color: #ffffff; text-decoration: none;">{safe_t}</a>'
+            )
+            em.setObjectName("resourcePersonHEmail")
+            em.setTextFormat(Qt.TextFormat.RichText)
+            em.setOpenExternalLinks(True)
+            em.setWordWrap(True)
+            right.addWidget(em)
+
+        phone = str(resource.get("phone", "") or "").strip()
+        if phone:
+            prow = QHBoxLayout()
+            prow.setSpacing(6)
+            pic = QLabel("☎")
+            pic.setObjectName("resourcePersonHPhoneIcon")
+            pt = QLabel()
+            pt.setObjectName("resourcePersonHPhone")
+            pt.setWordWrap(True)
+            tel_h = self._tel_href_from_display(phone)
+            if tel_h:
+                pt.setTextFormat(Qt.TextFormat.RichText)
+                pt.setText(
+                    f'<a href="{escape(tel_h, quote=True)}" style="color: #ffffff; text-decoration: none;">'
+                    f"{escape(phone)}</a>"
+                )
+                pt.setOpenExternalLinks(True)
+            else:
+                pt.setTextFormat(Qt.TextFormat.PlainText)
+                pt.setText(phone)
+            prow.addWidget(pic, alignment=Qt.AlignmentFlag.AlignTop)
+            prow.addWidget(pt, 1)
+            right.addLayout(prow)
+
+        linkedin = str(resource.get("linkedin", "") or "").strip()
+        href_li = self._resource_linkedin_href(linkedin) if linkedin else ""
+        show_rule = bool(href_li) and bool(email or phone)
+        if show_rule:
+            rule = QFrame()
+            rule.setObjectName("resourcePersonHRule")
+            rule.setFixedHeight(1)
+            right.addWidget(rule)
+
+        if href_li:
+            lrow = QHBoxLayout()
+            lrow.setSpacing(8)
+            lin = QLabel("in")
+            lin.setObjectName("resourcePersonHInBadge")
+            display = self._linkedin_display_url(href_li)
+            lt = QLabel(
+                f'<a href="{escape(href_li, quote=True)}" style="color: #ffffff; text-decoration: none;">'
+                f"{escape(display)}</a>"
+            )
+            lt.setObjectName("resourcePersonHLinkedin")
+            lt.setTextFormat(Qt.TextFormat.RichText)
+            lt.setOpenExternalLinks(True)
+            lt.setWordWrap(True)
+            lrow.addWidget(lin, alignment=Qt.AlignmentFlag.AlignTop)
+            lrow.addWidget(lt, 1)
+            right.addLayout(lrow)
+
+        note = str(resource.get("note", "") or "").strip()
+        if note:
+            nl = QLabel(note)
+            nl.setObjectName("resourcePersonHNote")
+            nl.setWordWrap(True)
+            right.addWidget(nl)
+
+        right.addStretch()
+        right_w = QWidget()
+        right_w.setObjectName("resourcePersonHRight")
+        right_w.setAutoFillBackground(False)
+        right_w.setLayout(right)
+        root.addWidget(right_w, 1)
+
+        return card
+
     def _render_info_role_sections(self, resource_names: list[str]) -> None:
         self._clear_layout(self.info_roles_layout)
-    
+
         if not resource_names:
             empty = QLabel("Nessuna risorsa collegata.")
             empty.setObjectName("subText")
             self.info_roles_layout.addWidget(empty)
             self.info_roles_layout.addStretch()
             return
-    
+
         lookup: dict[str, dict] = {}
         for resource in self.resources_cache:
             full_name = f"{resource.get('name', '')} {resource.get('surname', '')}".strip().lower()
             if full_name:
                 lookup[full_name] = resource
-    
+
         grouped: dict[str, list[dict]] = defaultdict(list)
         for resource_name in resource_names:
             row = lookup.get(resource_name.lower())
@@ -2606,6 +3338,8 @@ class ClientsMixin:
                         "surname": "",
                         "phone": "",
                         "email": "",
+                        "linkedin": "",
+                        "photo_link": "",
                         "note": "",
                         "role_name": "Senza ruolo",
                     }
@@ -2613,132 +3347,138 @@ class ClientsMixin:
             else:
                 role_name = str(row.get("role_name") or "Senza ruolo").strip()
                 grouped[role_name].append(row)
-    
+
         for role_name in sorted(
             grouped.keys(),
             key=lambda value: (self.role_order_map.get(value.lower(), 999), value.lower()),
         ):
             resources = grouped[role_name]
-            is_multi = self.role_multi_map.get(role_name.lower(), False)
-    
+
             card = QWidget()
             card.setObjectName("roleCard")
             card_layout = QVBoxLayout(card)
-            card_layout.setContentsMargins(10, 10, 10, 10)
-            card_layout.setSpacing(6)
-    
+            card_layout.setContentsMargins(12, 12, 12, 12)
+            card_layout.setSpacing(10)
+
+            head = QHBoxLayout()
             title = QLabel(role_name)
             title.setObjectName("roleCardTitle")
-            card_layout.addWidget(title)
-    
-            # Mostriamo solo le risorse collegate; non esponiamo "piu clienti si/no"
-            # perché è una proprietà tecnica del ruolo e risulta confondente nell'Info Cliente.
-    
-            if is_multi:
-                table = QTableWidget(len(resources), 4)
-                table.setHorizontalHeaderLabels(["Risorsa", "Telefono", "Email", "Note"])
-                table.verticalHeader().setVisible(False)
-                table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-                table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-                table.setAlternatingRowColors(True)
-                table.setColumnWidth(0, 250)
-                table.setColumnWidth(1, 160)
-                table.setColumnWidth(2, 230)
-                table.horizontalHeader().setStretchLastSection(True)
+            head.addWidget(title)
+            count_badge = QLabel(str(len(resources)))
+            count_badge.setObjectName("roleCountBadge")
+            count_badge.setFixedHeight(22)
+            count_badge.setMinimumWidth(28)
+            count_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            head.addStretch()
+            head.addWidget(count_badge, alignment=Qt.AlignmentFlag.AlignRight)
+            card_layout.addLayout(head)
 
-                # Rendiamo cliccabile la colonna Email.
-                def _on_cell_clicked(r: int, c: int, tbl=table) -> None:
-                    if c != 2:
-                        return
-                    item = tbl.item(r, c)
-                    if item is None:
-                        return
-                    email = item.text().strip()
-                    if not email:
-                        return
-                    QDesktopServices.openUrl(QUrl(f"mailto:{email}"))
+            people_row = QWidget()
+            people_row.setObjectName("resourcePersonRowInner")
+            people_row.setFixedHeight(124)
+            people_row_l = QHBoxLayout(people_row)
+            people_row_l.setContentsMargins(0, 0, 0, 0)
+            people_row_l.setSpacing(14)
+            for resource in resources:
+                people_row_l.addWidget(self._resource_person_card(resource), 0)
+            people_row_l.addStretch()
 
-                table.cellClicked.connect(_on_cell_clicked)
-    
-                for row_idx, resource in enumerate(resources):
-                    full = f"{resource.get('name', '')} {resource.get('surname', '')}".strip()
-                    self._set_table_item(table, row_idx, 0, full)
-                    self._set_table_item(table, row_idx, 1, resource.get("phone", ""))
-                    self._set_table_item(table, row_idx, 2, resource.get("email", ""))
-                    self._set_table_item(table, row_idx, 3, resource.get("note", ""))
-    
-                card_layout.addWidget(table)
-            else:
-                parts: list[str] = []
-                for resource in resources:
-                    full = escape(
-                        f"{resource.get('name', '')} {resource.get('surname', '')}".strip()
-                    )
-                    phone = str(resource.get("phone", "") or "").strip()
-                    email = str(resource.get("email", "") or "").strip()
-                    note = str(resource.get("note", "") or "").strip()
+            people_scroll = QScrollArea()
+            people_scroll.setObjectName("resourcePersonRowScroll")
+            people_scroll.setWidgetResizable(False)
+            people_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            people_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            people_scroll.setFrameShape(QFrame.Shape.NoFrame)
+            people_scroll.setFixedHeight(136)
+            people_scroll.setWidget(people_row)
 
-                    details: list[str] = []
-                    if phone:
-                        details.append(escape(phone))
-                    if email:
-                        safe_email = escape(email, quote=True)
-                        safe_label = escape(email)
-                        details.append(
-                            f'<a href="mailto:{safe_email}">{safe_label}</a>'
-                        )
+            card_layout.addWidget(people_scroll)
 
-                    if details:
-                        line = f"{full} ({' - '.join(details)})"
-                    else:
-                        line = full if full else "-"
-
-                    if note:
-                        line += f"<br/>Nota: {escape(note)}"
-
-                    parts.append(line)
-
-                single = QLabel("<br/>".join(parts) if parts else "-")
-                single.setObjectName("infoValue")
-                single.setWordWrap(True)
-                single.setTextFormat(Qt.TextFormat.RichText)
-                single.setOpenExternalLinks(True)
-                single.setTextInteractionFlags(
-                    Qt.TextInteractionFlag.TextBrowserInteraction
-                )
-                card_layout.addWidget(single)
-    
             self.info_roles_layout.addWidget(card)
-    
+
         self.info_roles_layout.addStretch()
     
 
     def _render_info_products_area(self, client: dict, selected_product: dict | None = None) -> None:
+        self._clear_layout(self.info_products_layout)
+
         client_id = client.get("id")
         if client_id is None:
-            self.info_products_area.setText("Cliente non valido.")
+            msg = QLabel("Cliente non valido.")
+            msg.setObjectName("subText")
+            msg.setWordWrap(True)
+            self.info_products_layout.addWidget(msg)
             return
-    
+
         products = (
             self.repository.clients.list_client_product_environment_releases(int(client_id))
             if hasattr(self.repository, "clients")
             else self.repository.list_client_product_environment_releases(int(client_id))
         )
         if not products:
-            self.info_products_area.setText(
-                "Nessun prodotto collegato al cliente."
-            )
+            msg = QLabel("Nessun prodotto collegato al cliente.")
+            msg.setObjectName("subText")
+            msg.setWordWrap(True)
+            self.info_products_layout.addWidget(msg)
             return
-    
-        selected_product_id = int(selected_product["id"]) if selected_product and selected_product.get("id") is not None else None
-        lines: list[str] = []
+
+        selected_product_id = (
+            int(selected_product["id"])
+            if selected_product and selected_product.get("id") is not None
+            else None
+        )
         for row in products:
-            product_name = str(row.get("product_name", "")).strip()
+            product_name = str(row.get("product_name", "")).strip() or "Prodotto"
             summary = str(row.get("summary", "")).strip() or "Nessun ambiente associato"
+            pairs = row.get("pairs") or []
+            if pairs:
+                env_release_line = ", ".join(
+                    str(p).strip() for p in pairs if str(p).strip()
+                )
+            else:
+                env_release_line = summary
+
             product_id = row.get("product_id")
-            marker = "-> " if selected_product_id is not None and int(product_id) == selected_product_id else ""
-            lines.append(f"{marker}{product_name} => {summary}")
-        self.info_products_area.setText("\n".join(lines))
+            is_sel = (
+                selected_product_id is not None
+                and product_id is not None
+                and int(product_id) == selected_product_id
+            )
+
+            card = QFrame()
+            card.setObjectName("productLinkCardSelected" if is_sel else "productLinkCard")
+            main_v = QVBoxLayout(card)
+            main_v.setContentsMargins(0, 0, 0, 0)
+            main_v.setSpacing(0)
+
+            top = QFrame()
+            top.setObjectName("productLinkCardTop")
+            top_l = QVBoxLayout(top)
+            top_l.setContentsMargins(12, 10, 12, 10)
+            top_l.setSpacing(4)
+
+            title_row = QHBoxLayout()
+            title_row.setSpacing(8)
+            name_lbl = QLabel(product_name)
+            name_lbl.setObjectName("productLinkTitle")
+            title_row.addWidget(name_lbl)
+            if is_sel:
+                badge = QLabel("In evidenza")
+                badge.setObjectName("productSelectedBadge")
+                title_row.addWidget(badge)
+            title_row.addStretch()
+            top_l.addLayout(title_row)
+
+            sub_lbl = QLabel(env_release_line)
+            sub_lbl.setObjectName("productLinkSubtitle")
+            sub_lbl.setWordWrap(True)
+            top_l.addWidget(sub_lbl)
+
+            main_v.addWidget(top)
+
+            self.info_products_layout.addWidget(card)
+
+        self.info_products_layout.addStretch()
     
 
     def _render_vpn_access(self, client: dict) -> None:
@@ -3095,9 +3835,14 @@ class ClientsMixin:
         empty.setObjectName("subText")
         self.info_roles_layout.addWidget(empty)
         self.info_roles_layout.addStretch()
-        self.info_products_area.setText(
-            "Area dedicata ai prodotti collegati. Le regole saranno implementate nel prossimo step."
-        )
+        if hasattr(self, "info_products_layout"):
+            self._clear_layout(self.info_products_layout)
+            ph = QLabel(
+                "Seleziona un cliente nell'elenco per vedere i prodotti collegati."
+            )
+            ph.setObjectName("subText")
+            ph.setWordWrap(True)
+            self.info_products_layout.addWidget(ph)
         self._set_vpn_card_values()
         self.vpn_connect_btn.setEnabled(False)
         self.access_product_label.setText("Seleziona un prodotto nella lista clienti.")
@@ -3116,6 +3861,10 @@ class ClientsMixin:
         link = (raw_link or "").strip()
         if not link:
             self.info_link_value.setText("-")
+            self._client_info_website_href = ""
+            if hasattr(self, "info_site_open_btn"):
+                self.info_site_open_btn.setEnabled(False)
+            self._schedule_client_favicon("")
             return
 
         href = link
@@ -3129,8 +3878,138 @@ class ClientsMixin:
 
         safe_label = escape(link)
         safe_href = escape(href, quote=True)
-        self.info_link_value.setText(f'<a href="{safe_href}">{safe_label}</a>')
-    
+        pill = (
+            "display: inline-block; background: #e3f0ff; color: #1565c0; "
+            "padding: 4px 10px; border-radius: 999px; text-decoration: underline; "
+            "font-weight: 600;"
+        )
+        self.info_link_value.setText(
+            f'<a href="{safe_href}" style="{pill}">🔗 {safe_label}</a>'
+        )
+        self._client_info_website_href = href
+        if hasattr(self, "info_site_open_btn"):
+            self.info_site_open_btn.setEnabled(True)
+        self._schedule_client_favicon(link)
+
+    def _open_client_website_from_info(self) -> None:
+        href = getattr(self, "_client_info_website_href", "") or ""
+        if not href:
+            return
+        QDesktopServices.openUrl(QUrl(href))
+
+    def _schedule_client_favicon(self, raw_link: str) -> None:
+        if not hasattr(self, "info_site_logo"):
+            return
+
+        self._favicon_gen = getattr(self, "_favicon_gen", 0) + 1
+        gen = self._favicon_gen
+
+        if getattr(self, "_favicon_reply", None) is not None:
+            self._favicon_reply.abort()
+            self._favicon_reply.deleteLater()
+            self._favicon_reply = None
+
+        link = (raw_link or "").strip()
+        if not link:
+            self.info_site_logo.clear()
+            self.info_site_logo.setText("Sito")
+            self.info_site_host_label.setText("")
+            return
+
+        href, host = self._client_website_href_and_host(link)
+        lowered = link.lower()
+
+        if lowered.startswith("mailto:"):
+            self.info_site_logo.clear()
+            self.info_site_logo.setText("@")
+            display = href[7:].strip() if href.lower().startswith("mailto:") else link
+            self.info_site_host_label.setText(display)
+            return
+
+        if not host:
+            self.info_site_logo.clear()
+            self.info_site_logo.setText("Sito")
+            self.info_site_host_label.setText("")
+            return
+
+        self.info_site_host_label.setText(host)
+        self.info_site_logo.clear()
+        self.info_site_logo.setText("…")
+
+        if not hasattr(self, "_favicon_nam"):
+            self._favicon_nam = QNetworkAccessManager(self)
+
+        req = QNetworkRequest(QUrl(f"https://www.google.com/s2/favicons?domain={host}&sz=128"))
+        reply = self._favicon_nam.get(req)
+        self._favicon_reply = reply
+
+        def _done() -> None:
+            reply.deleteLater()
+            if gen != self._favicon_gen:
+                return
+            self._favicon_reply = None
+            err = reply.error()
+            if err != QNetworkReply.NetworkError.NoError:
+                self.info_site_logo.clear()
+                self.info_site_logo.setText("Sito")
+                return
+            pix = QPixmap()
+            if not pix.loadFromData(reply.readAll()):
+                self.info_site_logo.clear()
+                self.info_site_logo.setText("Sito")
+                return
+            scaled = pix.scaled(
+                88,
+                88,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            self.info_site_logo.setText("")
+            self.info_site_logo.setPixmap(scaled)
+
+        reply.finished.connect(_done)
+
+    @staticmethod
+    def _client_website_href_and_host(raw_link: str) -> tuple[str, str]:
+        link = (raw_link or "").strip()
+        if not link:
+            return "", ""
+        href = link
+        lowered = link.lower()
+        if not (
+            lowered.startswith("http://")
+            or lowered.startswith("https://")
+            or lowered.startswith("mailto:")
+        ):
+            href = f"https://{link}"
+        if lowered.startswith("mailto:"):
+            return href, ""
+        parsed = urlparse(href)
+        host = (parsed.hostname or "").strip().lower()
+        if not host and parsed.path:
+            segment = parsed.path.strip("/").split("/")[0]
+            if segment and "." in segment:
+                host = segment.lower()
+        return href, host
+
+    @staticmethod
+    def _resource_linkedin_href(raw: str) -> str:
+        s = (raw or "").strip()
+        if not s:
+            return ""
+        low = s.lower()
+        if low.startswith("https://"):
+            return s
+        if low.startswith("http://"):
+            return f"https://{s[7:].lstrip('/')}"
+        if "linkedin.com" in low:
+            tail = s.split("://", 1)[-1].lstrip("/")
+            return f"https://{tail}"
+        path = s.strip("/")
+        if not path.startswith("in/"):
+            path = f"in/{path}"
+        return f"https://www.linkedin.com/{path}"
+
     # Helpers
     @staticmethod
 
@@ -3139,10 +4018,13 @@ class ClientsMixin:
         details: list[str] = []
         phone = str(resource.get("phone", "") or "").strip()
         email = str(resource.get("email", "") or "").strip()
+        linkedin = str(resource.get("linkedin", "") or "").strip()
         if phone:
             details.append(phone)
         if email:
             details.append(email)
+        if linkedin:
+            details.append(linkedin)
         if details:
             return f"{full} ({' - '.join(details)})"
         return full

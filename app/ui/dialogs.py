@@ -122,6 +122,7 @@ class CredentialDialog(QDialog):
         product: dict,
         flags: dict,
         credential: dict | None = None,
+        credential_suggestion: dict | None = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -130,6 +131,7 @@ class CredentialDialog(QDialog):
         self.product = product
         self.flags = flags
         self.credential = credential or {}
+        self.credential_suggestion = credential_suggestion or {}
         self.is_edit_mode = self.credential.get("id") is not None
         self.version_combos: dict[str, QComboBox] = {}
 
@@ -365,6 +367,8 @@ class CredentialDialog(QDialog):
 
         self._toggle_expiry_fields(False)
         self._apply_initial_values()
+        if not self.is_edit_mode:
+            self._apply_credential_suggestion()
 
     def _copy_password(self) -> None:
         value = self.password_edit.text().strip()
@@ -419,7 +423,7 @@ class CredentialDialog(QDialog):
             row_layout = QHBoxLayout(row)
             row_layout.setContentsMargins(0, 0, 0, 0)
             row_layout.setSpacing(8)
-            row_layout.addWidget(QLabel(f"Versione [{env_name}]"))
+            row_layout.addWidget(QLabel(f"Versione [{env_name}] (opzionale)"))
             combo = QComboBox()
             combo.addItem("")
             combo.addItems(self.versions)
@@ -567,6 +571,22 @@ class CredentialDialog(QDialog):
         elif expiry_enabled:
             self._sync_expiry_fields_from_duration()
 
+    def _apply_credential_suggestion(self) -> None:
+        """Precompila dominio/IP/Host dall'ultima credenziale dello stesso prodotto (solo suggerimento)."""
+        sug = self.credential_suggestion
+        if not sug:
+            return
+        dom = str(sug.get("domain") or "").strip()
+        ip = str(sug.get("ip") or "").strip()
+        host = str(sug.get("host") or "").strip()
+        if dom and not self.domain_edit.text().strip():
+            self.domain_edit.setText(dom)
+            self._update_username()
+        if self.ip_edit is not None and ip and not self.ip_edit.text().strip():
+            self.ip_edit.setText(ip)
+        if self.host_edit is not None and host and not self.host_edit.text().strip():
+            self.host_edit.setText(host)
+
     def _submit(self) -> None:
         try:
             self._save_credential()
@@ -594,8 +614,6 @@ class CredentialDialog(QDialog):
         for env_name in environments:
             combo = self.version_combos.get(env_name)
             release_name = combo.currentText().strip() if combo is not None else ""
-            if not release_name:
-                raise ValueError(f"Versione obbligatoria per ambiente '{env_name}'.")
             env_versions.append((env_name, release_name))
 
         ip_value = self.ip_edit.text().strip() if self.ip_edit is not None else ""

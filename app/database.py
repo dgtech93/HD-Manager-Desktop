@@ -95,6 +95,8 @@ CREATE TABLE IF NOT EXISTS resources (
     role_id INTEGER REFERENCES roles(id) ON DELETE SET NULL,
     phone TEXT,
     email TEXT,
+    linkedin TEXT,
+    photo_link TEXT,
     note TEXT
 );
 
@@ -424,6 +426,42 @@ def _migrate_clients_link_column(connection: sqlite3.Connection) -> None:
         connection.execute("ALTER TABLE clients ADD COLUMN link TEXT;")
 
 
+def _migrate_resources_linkedin_column(connection: sqlite3.Connection) -> None:
+    columns = connection.execute("PRAGMA table_info(resources);").fetchall()
+    if not columns:
+        return
+    column_names = {row["name"] for row in columns}
+    if "linkedin" in column_names:
+        return
+    with connection:
+        connection.execute("ALTER TABLE resources ADD COLUMN linkedin TEXT;")
+
+
+def _migrate_resources_photo_link_column(connection: sqlite3.Connection) -> None:
+    columns = connection.execute("PRAGMA table_info(resources);").fetchall()
+    if not columns:
+        return
+    column_names = {row["name"] for row in columns}
+    if "photo_link" in column_names:
+        return
+    with connection:
+        connection.execute("ALTER TABLE resources ADD COLUMN photo_link TEXT;")
+
+
+def _migrate_resources_competence_id_column(connection: sqlite3.Connection) -> None:
+    columns = connection.execute("PRAGMA table_info(resources);").fetchall()
+    if not columns:
+        return
+    column_names = {row["name"] for row in columns}
+    if "competence_id" in column_names:
+        return
+    with connection:
+        connection.execute(
+            "ALTER TABLE resources ADD COLUMN competence_id INTEGER "
+            "REFERENCES competences(id) ON DELETE SET NULL;"
+        )
+
+
 def _migrate_indexes(connection: sqlite3.Connection) -> None:
     # Archive
     connection.execute(
@@ -622,6 +660,9 @@ def init_db() -> None:
         _migrate_vpn_path_column(connection)
         _migrate_password_ref_columns(connection)
         _migrate_clients_link_column(connection)
+        _migrate_resources_linkedin_column(connection)
+        _migrate_resources_photo_link_column(connection)
+        _migrate_resources_competence_id_column(connection)
         _migrate_archive_links_columns(connection)
         _migrate_archive_folder_delete_behavior(connection)
         _migrate_tags_client_column(connection)

@@ -13,6 +13,7 @@ from app.services.system_service import SystemService
 
 class Repository:
     VPN_TYPES = {"Vpn Proprietario", "VPN Windows"}
+    VPN_ACCESS_INFO_TYPES = frozenset({"Utente/Password", "File Configurato"})
 
     def __init__(self, connection_factory=get_connection) -> None:
         self.connection_factory = connection_factory
@@ -384,6 +385,9 @@ class Repository:
                 "Aggiornamento tag",
             )
             return int(row_id)
+        existing_id = self._tag_id_from_name(clean_name)
+        if existing_id is not None:
+            return int(existing_id)
         return self._insert(
             "INSERT INTO tags(name, color, client_id) VALUES (?, ?, ?);",
             (clean_name, clean_color, client_id),
@@ -690,11 +694,17 @@ class Repository:
             clean_name = self._req(connection_name, "Nome connessione")
             clean_path = self._req(vpn_path, "Percorso VPN")
 
+        clean_access = self._opt(access_info_type)
+        if clean_access and clean_access not in self.VPN_ACCESS_INFO_TYPES:
+            raise ValueError(
+                "Tipo Info Accesso non valido. Valori ammessi: Utente/Password, File Configurato."
+            )
+
         payload = (
             clean_name,
             self._req(server_address, "Indirizzo server"),
             clean_vpn_type,
-            self._opt(access_info_type),
+            clean_access,
             self._req(username, "Nome utente"),
             self._req(password, "Password"),
             self._opt(clean_path),
@@ -759,11 +769,15 @@ class Repository:
                    rs.name,
                    rs.surname,
                    rl.name AS role_name,
+                   cm.name AS competence_name,
                    rs.phone,
                    rs.email,
+                   rs.linkedin,
+                   rs.photo_link,
                    rs.note
             FROM resources rs
             LEFT JOIN roles rl ON rl.id = rs.role_id
+            LEFT JOIN competences cm ON cm.id = rs.competence_id
             ORDER BY rs.name, rs.surname;
             """
         )
@@ -772,29 +786,39 @@ class Repository:
         role_map = self._lookup_map("SELECT id, name AS label FROM roles ORDER BY name;")
         return self._name_to_id(role_name, role_map, "Ruolo", allow_empty=False)
 
+    def _competence_id(self, competence_name: str) -> int | None:
+        mapping = self._lookup_map("SELECT id, name AS label FROM competences ORDER BY name;")
+        return self._name_to_id(competence_name, mapping, "Competenza", allow_empty=True)
+
     def upsert_resource(
         self,
         row_id: int | None,
         name: str,
         surname: str,
         role_name: str = "",
+        competence_name: str = "",
         phone: str = "",
         email: str = "",
+        linkedin: str = "",
+        photo_link: str = "",
         note: str = "",
     ) -> int:
         payload = (
             self._req(name, "Nome risorsa"),
             self._req(surname, "Cognome risorsa"),
             self._role_id(role_name),
+            self._competence_id(competence_name),
             self._opt(phone),
             self._opt(email),
+            self._opt(linkedin),
+            self._opt(photo_link),
             self._opt(note),
         )
         if row_id:
             self._execute(
                 """
                 UPDATE resources
-                SET name=?, surname=?, role_id=?, phone=?, email=?, note=?
+                SET name=?, surname=?, role_id=?, competence_id=?, phone=?, email=?, linkedin=?, photo_link=?, note=?
                 WHERE id=?;
                 """,
                 payload + (int(row_id),),
@@ -803,8 +827,8 @@ class Repository:
             return int(row_id)
         return self._insert(
             """
-            INSERT INTO resources(name, surname, role_id, phone, email, note)
-            VALUES (?, ?, ?, ?, ?, ?);
+            INSERT INTO resources(name, surname, role_id, competence_id, phone, email, linkedin, photo_link, note)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
             """,
             payload,
             "Inserimento risorsa",
@@ -1155,13 +1179,12 @@ class Repository:
         env_map = self._lookup_map("SELECT id, name AS label FROM environments ORDER BY name;")
         rel_map = self._lookup_map("SELECT id, name AS label FROM releases ORDER BY name;")
 
-        env_payload: list[tuple[int, int]] = []
+        env_payload: list[tuple[int, int | None]] = []
         seen_env: set[int] = set()
         for environment_name, release_name in environment_versions:
             environment_id = self._name_to_id(environment_name, env_map, "Ambiente")
-            release_id = self._name_to_id(release_name, rel_map, "Versione")
+            release_id = self._name_to_id(release_name, rel_map, "Versione", allow_empty=True)
             assert environment_id is not None
-            assert release_id is not None
             if environment_id in seen_env:
                 continue
             seen_env.add(environment_id)
@@ -2186,13 +2209,26 @@ class Repository:
         phone: str,
         email: str,
         note: str,
+        linkedin: str = "",
+        photo_link: str = "",
     ) -> int:
         role_name = ""
         if role_id:
             row = self._query("SELECT name FROM roles WHERE id = ?;", (int(role_id),))
             if row:
                 role_name = row[0]["name"]
-        return self.upsert_resource(None, name, surname, role_name, phone, email, note)
+        return self.upsert_resource(
+            None,
+            name,
+            surname,
+            role_name,
+            "",
+            phone,
+            email,
+            linkedin,
+            photo_link,
+            note,
+        )
 
     def add_client(
         self,

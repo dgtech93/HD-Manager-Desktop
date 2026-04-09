@@ -1,6 +1,29 @@
-# HD Manager Desktop - Release v1.0.4
+# HD Manager Desktop - Release v1.0.5
 
 Applicazione desktop per la gestione di clienti, prodotti, risorse, VPN e archivio documentale.
+
+---
+
+## Note di rilascio v1.0.5
+
+### Versione applicazione
+- Titolo finestra principale con numero versione (da `app/version.py`).
+- Allineamento versione: `installer.iss`, `scripts/build_release.ps1`, queste note.
+
+### Impostazioni — Ruoli, risorse e competenze
+- Vista unica con tre tabelle verticali: **Competenze** → **Ruoli** → **Risorse**.
+- In **Risorse**: colonna opzionale **Competenza** (scelta dalle competenze definite).
+- In **Info cliente**, sulla card persona: competenza mostrata sotto il nome se presente.
+
+### SQL — Archivio query (linguetta SQL)
+- **Gestione**: sostituzione **tabelle** (anche da `FROM` in sottoquery), **alias** (anche in `Alias.campo`), **solo nome campo** dopo il punto nelle espressioni qualificate.
+- Sezioni a fisarmonica (**Tabelle** / **Alias di tabella** / **Campi qualificati**), stile coerente con il resto dell’app.
+- Campi «Sostituisci con» **precompilati** con i valori rilevati (modificabili senza riscrivere tutto).
+- Indicazione campi usati anche in WHERE/HAVING (tooltip).
+
+### Installazione / aggiornamento
+- Comportamento confermato: in esecuzione installata il database è in `%LOCALAPPDATA%\HDManagerDesktop\data\`; **l’aggiornamento installer sostituisce solo i file in cartella programma**, non cancella i dati utente in LocalAppData.
+- Prima installazione: installazione standard; al primo avvio viene creato il DB in LocalAppData se assente.
 
 ---
 
@@ -78,7 +101,7 @@ Applicazione desktop per la gestione di clienti, prodotti, risorse, VPN e archiv
 
 ## Installazione
 
-1. Scarica `HDManagerDesktop-Setup-1.0.4.exe` dalla release
+1. Scarica `HDManagerDesktop-Setup-1.0.5.exe` dalla release
 2. Esegui l'installer (richiesti privilegi amministratore)
 3. Segui la procedura guidata
 4. Opzionale: crea icona sul desktop

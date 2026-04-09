@@ -1,12 +1,16 @@
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, QUrl
-from PyQt6.QtGui import QColor, QDesktopServices, QPixmap
+import os
+
+from PyQt6.QtCore import QFileInfo, QSize, Qt, QUrl
+from PyQt6.QtGui import QColor, QDesktopServices, QIcon, QPixmap
 from PyQt6.QtWidgets import (
+    QAbstractItemView,
     QComboBox,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
+    QFileIconProvider,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -19,6 +23,7 @@ from PyQt6.QtWidgets import (
     QInputDialog,
     QPushButton,
     QSplitter,
+    QStyle,
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -29,57 +34,142 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from app.ui.dialogs import LinkDialog
+from app.ui.ui_constants import SIDE_MENU_TAB_CONTENT_MARGINS, SIDE_MENU_WIDTH_PX
+
 
 class ArchiveMixin:
     # Archive UI + behaviors
+
+    def _archive_file_icon_provider(self) -> QFileIconProvider:
+        if not hasattr(self, "_archive_fip"):
+            self._archive_fip = QFileIconProvider()
+        return self._archive_fip
+
+    def _archive_icon_for_file(self, path: str | None, extension: str | None = None) -> QIcon:
+        p = (path or "").strip()
+        if p and os.path.isfile(p):
+            return self._archive_file_icon_provider().icon(QFileInfo(p))
+        ext = (extension or "").strip().lstrip(".").lower()
+        if ext:
+            dummy = os.path.join(
+                os.environ.get("TEMP", os.path.expanduser("~")),
+                f"_hdm_icon.{ext}",
+            )
+            return self._archive_file_icon_provider().icon(QFileInfo(dummy))
+        return self._archive_file_icon_provider().icon(QFileIconProvider.IconType.File)
+
+    def _archive_icon_for_link(self, url: str | None) -> QIcon:
+        raw = (url or "").strip()
+        low = raw.lower()
+        style = self.style()
+        if low.startswith("mailto:"):
+            ic = QIcon.fromTheme("mail-message")
+            if not ic.isNull():
+                return ic
+            if style is not None:
+                return style.standardIcon(QStyle.StandardPixmap.SP_DirLinkIcon)
+        if low.startswith("ftp"):
+            ic = QIcon.fromTheme("folder-remote")
+            if not ic.isNull():
+                return ic
+        ic = QIcon.fromTheme("internet-web-browser")
+        if not ic.isNull():
+            return ic
+        if style is not None:
+            return style.standardIcon(QStyle.StandardPixmap.SP_DriveNetIcon)
+        return QIcon()
+
+    def _apply_archive_row_icon_file(
+        self,
+        table: QTableWidget,
+        row: int,
+        path: str | None,
+        extension: str | None,
+    ) -> None:
+        it = table.item(row, 0)
+        if it is not None:
+            it.setIcon(self._archive_icon_for_file(path, extension))
+
+    def _apply_archive_row_icon_link(self, table: QTableWidget, row: int, url: str | None) -> None:
+        it = table.item(row, 0)
+        if it is not None:
+            it.setIcon(self._archive_icon_for_link(url))
+
+    @staticmethod
+    def _archive_style_table_icons(table: QTableWidget) -> None:
+        table.setIconSize(QSize(20, 20))
+
     def _build_archive_tab(self) -> QWidget:
         page = QWidget()
         layout = QHBoxLayout(page)
-        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setContentsMargins(*SIDE_MENU_TAB_CONTENT_MARGINS)
         layout.setSpacing(0)
     
         self.archive_menu = QListWidget()
         self.archive_menu.setObjectName("archiveSideMenu")
-        self.archive_menu.setFixedWidth(220)
-        for label in ("Preferiti", "TAG", "Archivio"):
+        self.archive_menu.setFixedWidth(SIDE_MENU_WIDTH_PX)
+        self.archive_menu.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.archive_menu.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        for label in ("Archivio", "Tag", "Preferiti"):
             self.archive_menu.addItem(QListWidgetItem(label))
         self.archive_menu.currentRowChanged.connect(self._on_archive_menu_changed)
-    
+
         self.archive_stack = QStackedWidget()
         self.archive_stack.setObjectName("archiveStack")
-        self.archive_stack.addWidget(self._build_archive_favorites_page())
-        self.archive_stack.addWidget(self._build_archive_tags_page())
         self.archive_stack.addWidget(self._build_archive_overview_page())
-    
+        self.archive_stack.addWidget(self._build_archive_tags_page())
+        self.archive_stack.addWidget(self._build_archive_favorites_page())
+
         layout.addWidget(self.archive_menu)
         layout.addWidget(self.archive_stack, 1)
-    
-        self.archive_menu.setCurrentRow(2)
+
+        self.archive_menu.setCurrentRow(0)
         return page
     
 
     def _build_archive_favorites_page(self) -> QWidget:
         page = QWidget()
+        page.setObjectName("archiveTabPage")
+        page.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(14, 14, 14, 14)
-        layout.setSpacing(10)
-    
-        title = QLabel("Preferiti")
-        title.setObjectName("sectionTitle")
-        layout.addWidget(title)
-    
-        self.favorites_hint_lbl = QLabel("Elementi archiviati contrassegnati come preferiti.")
-        self.favorites_hint_lbl.setObjectName("subText")
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(16)
+
+        card = QFrame()
+        card.setObjectName("clientDashboardCard")
+        card.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        card_l = QVBoxLayout(card)
+        card_l.setContentsMargins(0, 0, 0, 0)
+        card_l.setSpacing(0)
+        card_l.addWidget(self._client_info_card_header("⭐", "Preferiti"))
+
+        body = QWidget()
+        body_l = QVBoxLayout(body)
+        body_l.setContentsMargins(14, 14, 14, 14)
+        body_l.setSpacing(12)
+
+        self.favorites_hint_lbl = QLabel(
+            "File e link contrassegnati come preferiti (tasto destro nell’archivio)."
+        )
+        self.favorites_hint_lbl.setObjectName("accessProductHint")
+        self.favorites_hint_lbl.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.favorites_hint_lbl.setWordWrap(True)
-        layout.addWidget(self.favorites_hint_lbl)
-    
-        layout.addWidget(QLabel("File preferiti"))
+        body_l.addWidget(self.favorites_hint_lbl)
+
+        lf = QLabel("File")
+        lf.setObjectName("subText")
+        body_l.addWidget(lf)
+
         self.favorites_table = QTableWidget(0, 2)
+        self._archive_style_table_icons(self.favorites_table)
+        self.favorites_table.setObjectName("archiveFavoritesFilesTable")
         self.favorites_table.setHorizontalHeaderLabels(["Nome", "Percorso/URL"])
         self.favorites_table.verticalHeader().setVisible(False)
         self.favorites_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.favorites_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.favorites_table.setAlternatingRowColors(True)
+        self.favorites_table.setShowGrid(False)
         self.favorites_table.setColumnWidth(0, 260)
         self.favorites_table.horizontalHeader().setStretchLastSection(True)
         self.favorites_table.cellDoubleClicked.connect(self._open_favorite_file)
@@ -87,15 +177,26 @@ class ArchiveMixin:
         self.favorites_table.customContextMenuRequested.connect(
             self._on_favorites_files_menu
         )
-        layout.addWidget(self.favorites_table, 1)
-        layout.addWidget(QLabel("Link preferiti"), 0)
-    
+        ftw = QFrame()
+        ftw.setObjectName("clientDashboardTableWrap")
+        ftl = QVBoxLayout(ftw)
+        ftl.setContentsMargins(0, 0, 0, 0)
+        ftl.addWidget(self.favorites_table, 1)
+        body_l.addWidget(ftw, 1)
+
+        ll = QLabel("Link")
+        ll.setObjectName("subText")
+        body_l.addWidget(ll)
+
         self.favorites_links_table = QTableWidget(0, 2)
+        self._archive_style_table_icons(self.favorites_links_table)
+        self.favorites_links_table.setObjectName("archiveFavoritesLinksTable")
         self.favorites_links_table.setHorizontalHeaderLabels(["Nome", "URL"])
         self.favorites_links_table.verticalHeader().setVisible(False)
         self.favorites_links_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.favorites_links_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.favorites_links_table.setAlternatingRowColors(True)
+        self.favorites_links_table.setShowGrid(False)
         self.favorites_links_table.setColumnWidth(0, 260)
         self.favorites_links_table.horizontalHeader().setStretchLastSection(True)
         self.favorites_links_table.cellDoubleClicked.connect(self._open_favorite_link)
@@ -103,112 +204,179 @@ class ArchiveMixin:
         self.favorites_links_table.customContextMenuRequested.connect(
             self._on_favorites_links_menu
         )
-        layout.addWidget(self.favorites_links_table, 1)
+        ltw = QFrame()
+        ltw.setObjectName("clientDashboardTableWrap")
+        ltl = QVBoxLayout(ltw)
+        ltl.setContentsMargins(0, 0, 0, 0)
+        ltl.addWidget(self.favorites_links_table, 1)
+        body_l.addWidget(ltw, 1)
+
+        card_l.addWidget(body, 1)
+        layout.addWidget(card, 1)
         return page
     
 
     def _build_archive_tags_page(self) -> QWidget:
         page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(14, 14, 14, 14)
-        layout.setSpacing(10)
-    
-        title = QLabel("TAG")
-        title.setObjectName("sectionTitle")
-        layout.addWidget(title)
-    
+        page.setObjectName("archiveTabPage")
+        page.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(16, 16, 16, 16)
+        outer.setSpacing(0)
+
+        card = QFrame()
+        card.setObjectName("clientDashboardCard")
+        card.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        card_l = QVBoxLayout(card)
+        card_l.setContentsMargins(0, 0, 0, 0)
+        card_l.setSpacing(0)
+        card_l.addWidget(self._client_info_card_header("🏷️", "Tag"))
+
+        body = QWidget()
+        body_l = QVBoxLayout(body)
+        body_l.setContentsMargins(14, 14, 14, 14)
+        body_l.setSpacing(12)
+
         hint = QLabel(
-            "Lista tag definiti in Impostazioni. Seleziona un tag per vedere file e link associati."
+            "Tag definiti in Impostazioni. Seleziona un tag a sinistra per filtrare file e link."
         )
-        hint.setObjectName("subText")
+        hint.setObjectName("accessProductHint")
+        hint.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         hint.setWordWrap(True)
-        layout.addWidget(hint)
-    
+        body_l.addWidget(hint)
+
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setChildrenCollapsible(False)
-    
-        left = QWidget()
+
+        left = QFrame()
+        left.setObjectName("archiveBrowserPane")
+        left.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         left_layout = QVBoxLayout(left)
-        left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.setSpacing(6)
-        left_layout.addWidget(QLabel("Tag"))
-    
+        left_layout.setContentsMargins(10, 10, 10, 10)
+        left_layout.setSpacing(8)
+        tl = QLabel("Tag disponibili")
+        tl.setObjectName("subText")
+        left_layout.addWidget(tl)
+
         self.tags_table = QTableWidget(0, 1)
+        self.tags_table.setObjectName("archiveTagsListTable")
         self.tags_table.setHorizontalHeaderLabels(["Tag"])
         self.tags_table.verticalHeader().setVisible(False)
         self.tags_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.tags_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.tags_table.setAlternatingRowColors(True)
+        self.tags_table.setShowGrid(False)
         self.tags_table.setColumnWidth(0, 220)
         self.tags_table.horizontalHeader().setStretchLastSection(True)
         self.tags_table.cellClicked.connect(self._on_archive_tag_selected)
-        left_layout.addWidget(self.tags_table, 1)
+        tgw = QFrame()
+        tgw.setObjectName("clientDashboardTableWrap")
+        tgl = QVBoxLayout(tgw)
+        tgl.setContentsMargins(0, 0, 0, 0)
+        tgl.addWidget(self.tags_table, 1)
+        left_layout.addWidget(tgw, 1)
         splitter.addWidget(left)
-    
+
         right = QWidget()
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.setSpacing(8)
-    
-        files_title = QLabel("File con Tag")
+        right_layout.setSpacing(10)
+
+        files_title = QLabel("File con questo tag")
         files_title.setObjectName("subSectionTitle")
         right_layout.addWidget(files_title)
-    
+
         self.tags_files_table = QTableWidget(0, 3)
+        self._archive_style_table_icons(self.tags_files_table)
+        self.tags_files_table.setObjectName("archiveTaggedFilesTable")
         self.tags_files_table.setHorizontalHeaderLabels(["Nome", "Percorso", "Cartella"])
         self.tags_files_table.verticalHeader().setVisible(False)
         self.tags_files_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.tags_files_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.tags_files_table.setAlternatingRowColors(True)
+        self.tags_files_table.setShowGrid(False)
         self.tags_files_table.setColumnWidth(0, 240)
         self.tags_files_table.setColumnWidth(1, 360)
         self.tags_files_table.setColumnWidth(2, 200)
         self.tags_files_table.horizontalHeader().setStretchLastSection(True)
-        right_layout.addWidget(self.tags_files_table, 1)
-    
-        links_title = QLabel("Link con Tag")
+        self.tags_files_table.cellDoubleClicked.connect(self._on_tags_files_page_double_click)
+        tfw = QFrame()
+        tfw.setObjectName("clientDashboardTableWrap")
+        tfl = QVBoxLayout(tfw)
+        tfl.setContentsMargins(0, 0, 0, 0)
+        tfl.addWidget(self.tags_files_table, 1)
+        right_layout.addWidget(tfw, 1)
+
+        links_title = QLabel("Link con questo tag")
         links_title.setObjectName("subSectionTitle")
         right_layout.addWidget(links_title)
-    
+
         self.tags_links_table = QTableWidget(0, 3)
+        self._archive_style_table_icons(self.tags_links_table)
+        self.tags_links_table.setObjectName("archiveTaggedLinksTable")
         self.tags_links_table.setHorizontalHeaderLabels(["Nome", "URL", "Cartella"])
         self.tags_links_table.verticalHeader().setVisible(False)
         self.tags_links_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.tags_links_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.tags_links_table.setAlternatingRowColors(True)
+        self.tags_links_table.setShowGrid(False)
         self.tags_links_table.setColumnWidth(0, 240)
         self.tags_links_table.setColumnWidth(1, 360)
         self.tags_links_table.setColumnWidth(2, 200)
         self.tags_links_table.horizontalHeader().setStretchLastSection(True)
-        right_layout.addWidget(self.tags_links_table, 1)
-    
+        self.tags_links_table.cellDoubleClicked.connect(self._on_tags_links_page_double_click)
+        tlw = QFrame()
+        tlw.setObjectName("clientDashboardTableWrap")
+        tll = QVBoxLayout(tlw)
+        tll.setContentsMargins(0, 0, 0, 0)
+        tll.addWidget(self.tags_links_table, 1)
+        right_layout.addWidget(tlw, 1)
+
         splitter.addWidget(right)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([260, 760])
-        layout.addWidget(splitter, 1)
+        splitter.setSizes([280, 780])
+        body_l.addWidget(splitter, 1)
+
+        card_l.addWidget(body, 1)
+        outer.addWidget(card, 1)
         return page
     
 
     def _build_archive_overview_page(self) -> QWidget:
         page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(14, 14, 14, 14)
-        layout.setSpacing(10)
-    
-        title = QLabel("Archivio")
-        title.setObjectName("sectionTitle")
-        layout.addWidget(title)
-    
+        page.setObjectName("archiveTabPage")
+        page.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(16, 16, 16, 16)
+        outer.setSpacing(0)
+
+        card = QFrame()
+        card.setObjectName("clientDashboardCard")
+        card.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        card_l = QVBoxLayout(card)
+        card_l.setContentsMargins(0, 0, 0, 0)
+        card_l.setSpacing(0)
+        card_l.addWidget(self._client_info_card_header("🗂️", "Esplora archivio"))
+
+        body = QWidget()
+        body_l = QVBoxLayout(body)
+        body_l.setContentsMargins(14, 14, 14, 14)
+        body_l.setSpacing(0)
+
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setChildrenCollapsible(False)
-    
-        left = QWidget()
+
+        left = QFrame()
+        left.setObjectName("archiveBrowserPane")
+        left.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         left_layout = QVBoxLayout(left)
-        left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.setSpacing(6)
-        left_layout.addWidget(QLabel("Cartelle"))
-    
+        left_layout.setContentsMargins(10, 10, 10, 10)
+        left_layout.setSpacing(8)
+        cl = QLabel("Cartelle")
+        cl.setObjectName("subText")
+        left_layout.addWidget(cl)
+
         self.archive_folder_tree = QTreeWidget()
         self.archive_folder_tree.setObjectName("archiveFolderTree")
         self.archive_folder_tree.setHeaderHidden(True)
@@ -219,22 +387,26 @@ class ArchiveMixin:
         )
         left_layout.addWidget(self.archive_folder_tree, 1)
         splitter.addWidget(left)
-    
+
         right = QWidget()
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.setSpacing(8)
-    
+        right_layout.setSpacing(10)
+
         tabs = QTabWidget()
+        tabs.setObjectName("archiveOverviewTabWidget")
         tabs.addTab(self._build_archive_files_page(), "File")
         tabs.addTab(self._build_archive_links_page(), "Link")
         right_layout.addWidget(tabs, 1)
         splitter.addWidget(right)
-    
+
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([240, 820])
-        layout.addWidget(splitter, 1)
+        splitter.setSizes([260, 820])
+        body_l.addWidget(splitter, 1)
+
+        card_l.addWidget(body, 1)
+        outer.addWidget(card, 1)
         return page
     
 
@@ -242,16 +414,19 @@ class ArchiveMixin:
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
-    
-        toolbar = QHBoxLayout()
+        layout.setSpacing(12)
+
+        toolbar_wrap = QFrame()
+        toolbar_wrap.setObjectName("accessCredActionBar")
+        toolbar = QHBoxLayout(toolbar_wrap)
+        toolbar.setContentsMargins(10, 8, 10, 8)
         toolbar.setSpacing(8)
         self.archive_new_folder_btn = QPushButton("Nuova cartella")
         self.archive_subfolder_btn = QPushButton("Sottocartella")
         self.archive_add_file_btn = QPushButton("Aggiungi file")
         self.archive_delete_file_btn = QPushButton("Elimina file")
         self.archive_refresh_btn = QPushButton("Aggiorna")
-    
+
         for btn in (
             self.archive_new_folder_btn,
             self.archive_subfolder_btn,
@@ -259,12 +434,14 @@ class ArchiveMixin:
             self.archive_refresh_btn,
         ):
             btn.setObjectName("archiveActionButton")
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
             toolbar.addWidget(btn)
         self.archive_delete_file_btn.setObjectName("dangerActionButton")
+        self.archive_delete_file_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         toolbar.addWidget(self.archive_delete_file_btn)
         toolbar.addStretch()
-        layout.addLayout(toolbar)
-    
+        layout.addWidget(toolbar_wrap)
+
         filters = QHBoxLayout()
         filters.setSpacing(8)
         filters.addWidget(QLabel("Estensione"))
@@ -279,15 +456,20 @@ class ArchiveMixin:
         filters.addWidget(self.archive_filter_name, 1)
         clear_btn = QPushButton("Pulisci filtri")
         clear_btn.setObjectName("archiveActionButton")
+        clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         filters.addWidget(clear_btn)
         layout.addLayout(filters)
-    
+
         right_layout = QVBoxLayout()
         right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.setSpacing(6)
-        right_layout.addWidget(QLabel("File"))
-    
+        right_layout.setSpacing(8)
+        fl = QLabel("Contenuto cartella")
+        fl.setObjectName("subText")
+        right_layout.addWidget(fl)
+
         self.archive_files_table = QTableWidget(0, 7)
+        self._archive_style_table_icons(self.archive_files_table)
+        self.archive_files_table.setObjectName("archiveBrowseFilesTable")
         self.archive_files_table.setHorizontalHeaderLabels(
             ["Nome", "Tipo", "Ultima modifica", "Peso", "Estensione", "Percorso", "Tag"]
         )
@@ -295,6 +477,7 @@ class ArchiveMixin:
         self.archive_files_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.archive_files_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.archive_files_table.setAlternatingRowColors(True)
+        self.archive_files_table.setShowGrid(False)
         self.archive_files_table.setColumnWidth(0, 220)
         self.archive_files_table.setColumnWidth(1, 120)
         self.archive_files_table.setColumnWidth(2, 150)
@@ -309,7 +492,12 @@ class ArchiveMixin:
         self.archive_files_table.customContextMenuRequested.connect(
             self._on_archive_files_menu
         )
-        right_layout.addWidget(self.archive_files_table, 1)
+        ft_wrap = QFrame()
+        ft_wrap.setObjectName("clientDashboardTableWrap")
+        ftl = QVBoxLayout(ft_wrap)
+        ftl.setContentsMargins(0, 0, 0, 0)
+        ftl.addWidget(self.archive_files_table, 1)
+        right_layout.addWidget(ft_wrap, 1)
         layout.addLayout(right_layout, 1)
     
         self.archive_new_folder_btn.clicked.connect(self._create_archive_root_folder)
@@ -327,27 +515,32 @@ class ArchiveMixin:
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
-    
-        toolbar = QHBoxLayout()
+        layout.setSpacing(12)
+
+        toolbar_wrap = QFrame()
+        toolbar_wrap.setObjectName("accessCredActionBar")
+        toolbar = QHBoxLayout(toolbar_wrap)
+        toolbar.setContentsMargins(10, 8, 10, 8)
         toolbar.setSpacing(8)
         self.archive_new_link_btn = QPushButton("Nuovo link")
         self.archive_edit_link_btn = QPushButton("Modifica")
         self.archive_delete_link_btn = QPushButton("Elimina")
         self.archive_open_link_btn = QPushButton("Apri link")
-    
+
         for btn in (
             self.archive_new_link_btn,
             self.archive_edit_link_btn,
             self.archive_open_link_btn,
         ):
             btn.setObjectName("archiveActionButton")
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
             toolbar.addWidget(btn)
         self.archive_delete_link_btn.setObjectName("dangerActionButton")
+        self.archive_delete_link_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         toolbar.addWidget(self.archive_delete_link_btn)
         toolbar.addStretch()
-        layout.addLayout(toolbar)
-    
+        layout.addWidget(toolbar_wrap)
+
         filters = QHBoxLayout()
         filters.setSpacing(8)
         filters.addWidget(QLabel("Tag"))
@@ -362,15 +555,23 @@ class ArchiveMixin:
         filters.addWidget(self.archive_link_filter_name, 1)
         clear_btn = QPushButton("Pulisci filtri")
         clear_btn.setObjectName("archiveActionButton")
+        clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         filters.addWidget(clear_btn)
         layout.addLayout(filters)
-    
+
+        ll = QLabel("Link nella cartella")
+        ll.setObjectName("subText")
+        layout.addWidget(ll)
+
         self.archive_links_table = QTableWidget(0, 3)
+        self._archive_style_table_icons(self.archive_links_table)
+        self.archive_links_table.setObjectName("archiveBrowseLinksTable")
         self.archive_links_table.setHorizontalHeaderLabels(["Nome", "URL", "Tag"])
         self.archive_links_table.verticalHeader().setVisible(False)
         self.archive_links_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.archive_links_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.archive_links_table.setAlternatingRowColors(True)
+        self.archive_links_table.setShowGrid(False)
         self.archive_links_table.setColumnWidth(0, 260)
         self.archive_links_table.setColumnWidth(1, 380)
         self.archive_links_table.horizontalHeader().setStretchLastSection(True)
@@ -379,7 +580,12 @@ class ArchiveMixin:
         self.archive_links_table.customContextMenuRequested.connect(
             self._on_archive_links_menu
         )
-        layout.addWidget(self.archive_links_table, 1)
+        lw_wrap = QFrame()
+        lw_wrap.setObjectName("clientDashboardTableWrap")
+        lwl = QVBoxLayout(lw_wrap)
+        lwl.setContentsMargins(0, 0, 0, 0)
+        lwl.addWidget(self.archive_links_table, 1)
+        layout.addWidget(lw_wrap, 1)
     
         self.archive_new_link_btn.clicked.connect(self._create_archive_link)
         self.archive_edit_link_btn.clicked.connect(self._edit_selected_link)
@@ -413,8 +619,12 @@ class ArchiveMixin:
             if item_type == "file":
                 row = self.favorites_table.rowCount()
                 self.favorites_table.insertRow(row)
-                self._set_table_item(self.favorites_table, row, 0, fav.get("name", ""))
-                self._set_table_item(self.favorites_table, row, 1, fav.get("location", ""))
+                name = str(fav.get("name", "") or "")
+                path = str(fav.get("location", "") or "")
+                ext = os.path.splitext(name)[1].lstrip(".").lower() or None
+                self._set_table_item(self.favorites_table, row, 0, name)
+                self._set_table_item(self.favorites_table, row, 1, path)
+                self._apply_archive_row_icon_file(self.favorites_table, row, path, ext)
                 id_item = self.favorites_table.item(row, 0)
                 if id_item is not None:
                     id_item.setData(Qt.ItemDataRole.UserRole, fav.get("item_id"))
@@ -422,7 +632,9 @@ class ArchiveMixin:
                 row = self.favorites_links_table.rowCount()
                 self.favorites_links_table.insertRow(row)
                 self._set_table_item(self.favorites_links_table, row, 0, fav.get("name", ""))
-                self._set_table_item(self.favorites_links_table, row, 1, fav.get("location", ""))
+                loc = str(fav.get("location", "") or "")
+                self._set_table_item(self.favorites_links_table, row, 1, loc)
+                self._apply_archive_row_icon_link(self.favorites_links_table, row, loc)
                 id_item = self.favorites_links_table.item(row, 0)
                 if id_item is not None:
                     id_item.setData(Qt.ItemDataRole.UserRole, fav.get("item_id"))
@@ -466,6 +678,41 @@ class ArchiveMixin:
         tag_name = tag_item.text().strip()
         self._render_tagged_files(tag_name)
         self._render_tagged_links(tag_name)
+
+    def _on_tags_files_page_double_click(self, row: int, column: int) -> None:
+        """Apre il file con l’applicazione predefinita (doppio clic su «File con Tag»)."""
+        if not hasattr(self, "tags_files_table"):
+            return
+        path_item = self.tags_files_table.item(row, 1)
+        if path_item is None:
+            return
+        path = path_item.text().strip()
+        if not path:
+            return
+        if not os.path.isfile(path):
+            QMessageBox.warning(
+                self,
+                "Archivio",
+                "File non trovato sul disco. Potrebbe essere stato spostato o eliminato.",
+            )
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
+    def _on_tags_links_page_double_click(self, row: int, column: int) -> None:
+        """Apre l’URL del link (doppio clic su «Link con Tag»)."""
+        if not hasattr(self, "tags_links_table"):
+            return
+        url_item = self.tags_links_table.item(row, 1)
+        if url_item is None:
+            return
+        url = url_item.text().strip()
+        if not url:
+            return
+        q = QUrl.fromUserInput(url)
+        if not q.isValid():
+            QMessageBox.warning(self, "Archivio", "URL non valido.")
+            return
+        QDesktopServices.openUrl(q)
     
 
     def _render_tagged_files(self, tag_name: str) -> None:
@@ -482,6 +729,12 @@ class ArchiveMixin:
             self._set_table_item(self.tags_files_table, row, 1, row_data.get("path", ""))
             folder_label = folder_map.get(row_data.get("folder_id"))
             self._set_table_item(self.tags_files_table, row, 2, folder_label or "Archivio")
+            self._apply_archive_row_icon_file(
+                self.tags_files_table,
+                row,
+                str(row_data.get("path") or ""),
+                str(row_data.get("extension") or ""),
+            )
     
 
     def _render_tagged_links(self, tag_name: str) -> None:
@@ -495,9 +748,11 @@ class ArchiveMixin:
             row = self.tags_links_table.rowCount()
             self.tags_links_table.insertRow(row)
             self._set_table_item(self.tags_links_table, row, 0, row_data.get("name", ""))
-            self._set_table_item(self.tags_links_table, row, 1, row_data.get("url", ""))
+            url = str(row_data.get("url") or "")
+            self._set_table_item(self.tags_links_table, row, 1, url)
             folder_label = folder_map.get(row_data.get("folder_id"))
             self._set_table_item(self.tags_links_table, row, 2, folder_label or "Archivio")
+            self._apply_archive_row_icon_link(self.tags_links_table, row, url)
     
 
     def _render_archive_folders(self) -> None:
@@ -610,6 +865,12 @@ class ArchiveMixin:
             self._set_table_item(
                 self.archive_files_table, row, 6, row_data.get("tag_name", "")
             )
+            self._apply_archive_row_icon_file(
+                self.archive_files_table,
+                row,
+                str(row_data.get("path") or ""),
+                str(row_data.get("extension") or ""),
+            )
             id_item = self.archive_files_table.item(row, 0)
             if id_item is not None:
                 id_item.setData(Qt.ItemDataRole.UserRole, row_data.get("id"))
@@ -674,8 +935,10 @@ class ArchiveMixin:
             row = self.archive_links_table.rowCount()
             self.archive_links_table.insertRow(row)
             self._set_table_item(self.archive_links_table, row, 0, row_data.get("name", ""))
-            self._set_table_item(self.archive_links_table, row, 1, row_data.get("url", ""))
+            link_url = str(row_data.get("url") or "")
+            self._set_table_item(self.archive_links_table, row, 1, link_url)
             self._set_table_item(self.archive_links_table, row, 2, row_data.get("tag_name", ""))
+            self._apply_archive_row_icon_link(self.archive_links_table, row, link_url)
             id_item = self.archive_links_table.item(row, 0)
             if id_item is not None:
                 id_item.setData(Qt.ItemDataRole.UserRole, row_data.get("id"))
@@ -782,6 +1045,12 @@ class ArchiveMixin:
             QMessageBox.warning(self, "Cartella", str(exc))
     
 
+    def _list_tags_lookup_rows(self) -> list[dict]:
+        """Tag lookup: con MainController va usato `settings`; con repo legacy è sul repo."""
+        if hasattr(self.repository, "settings"):
+            return self.repository.settings.list_tags_lookup()
+        return self.repository.list_tags_lookup()
+
     def _select_tag_dialog(self, current: str = "") -> str:
         dialog = QDialog(self)
         dialog.setWindowTitle("Seleziona tag")
@@ -792,11 +1061,7 @@ class ArchiveMixin:
     
         combo = QComboBox()
         combo.addItem("")
-        if hasattr(self.repository, "settings"):
-            rows = self.repository.settings.list_tags_lookup()
-        else:
-            rows = self.repository.list_tags_lookup()
-        for row in rows:
+        for row in self._list_tags_lookup_rows():
             combo.addItem(row["label"])
         if current:
             combo.setCurrentText(current)
@@ -897,7 +1162,7 @@ class ArchiveMixin:
     
 
     def _create_archive_link(self) -> None:
-        tag_options = [row["label"] for row in self.repository.list_tags_lookup()]
+        tag_options = [row["label"] for row in self._list_tags_lookup_rows()]
         dialog = LinkDialog(tag_options, parent=self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
@@ -918,7 +1183,7 @@ class ArchiveMixin:
         if row is None:
             QMessageBox.information(self, "Link", "Seleziona un link.")
             return
-        tag_options = [row["label"] for row in self.repository.list_tags_lookup()]
+        tag_options = [row["label"] for row in self._list_tags_lookup_rows()]
         link = row.copy()
         dialog = LinkDialog(tag_options, link, self)
         if dialog.exec() != QDialog.DialogCode.Accepted:

@@ -1,5 +1,7 @@
 # APPDesktopHDManager
 
+**Versione corrente:** v1.0.5 (vedi `app/version.py`, `RELEASE_NOTES.md`).
+
 Applicazione desktop Python (PyQt6 + SQLite) per gestire:
 - Competenze
 - Setup Tipi Prodotti
@@ -78,9 +80,15 @@ Prerequisiti:
 Comando build completo (exe + installer):
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\build_release.ps1 -Version 1.0.0
+powershell -ExecutionPolicy Bypass -File .\scripts\build_release.ps1 -Version 1.0.5
 ```
 
 Output:
 - Build app: `dist\HDManagerDesktop\`
-- Installer: `dist-installer\HDManagerDesktop-Setup.exe`
+- Installer: `dist-installer\HDManagerDesktop-Setup-1.0.5.exe` (il numero versione segue il parametro `-Version`)
+
+### Installazione e aggiornamento
+
+- **Nuova installazione:** eseguire l’installer; il database viene creato in `%LOCALAPPDATA%\HDManagerDesktop\data\` (non in Program Files).
+- **Aggiornamento:** stesso `AppId` Inno Setup → installazione in-place su `{app}`; **i dati in LocalAppData non vengono rimossi** dall’aggiornamento.
+- **Disinstallazione:** rimozione opzionale dei dati locali solo se confermata dall’utente (vedi `installer.iss`).

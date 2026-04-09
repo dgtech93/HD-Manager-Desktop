@@ -221,6 +221,8 @@ class PackagingService:
                     "role_name": r.get("role_name") or "",
                     "phone": r.get("phone") or "",
                     "email": r.get("email") or "",
+                    "linkedin": r.get("linkedin") or "",
+                    "photo_link": r.get("photo_link") or "",
                     "note": r.get("note") or "",
                 }
             )
@@ -442,6 +444,8 @@ class PackagingService:
                 role_name=role_name,
                 phone=str(r.get("phone") or ""),
                 email=str(r.get("email") or ""),
+                linkedin=str(r.get("linkedin") or ""),
+                photo_link=str(r.get("photo_link") or ""),
                 note=str(r.get("note") or ""),
             )
             resources_by_key[f"{name}|{surname}"] = resource_id
