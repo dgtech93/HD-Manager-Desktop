@@ -67,6 +67,8 @@ from PyQt6.QtWidgets import (
     QStyleOptionViewItem,
 )
 
+from app.agenda_expand import normalize_item
+from app.ui.agenda_dialog import AgendaItemDialog
 from app.ui.ui_constants import SIDE_MENU_TAB_CONTENT_MARGINS, SIDE_MENU_WIDTH_PX
 from app.views.dialogs import CredentialDialog, ContactDialog
 
@@ -1279,17 +1281,37 @@ class ClientsMixin:
         actions.addStretch()
         self.contacts_add_btn = QPushButton("Nuovo contatto")
         self.contacts_edit_btn = QPushButton("Modifica")
+        self.contacts_call_btn = QPushButton("Chiama")
+        self.contacts_mail_btn = QPushButton("Invia Mail")
+        self.contacts_schedule_call_btn = QPushButton("Programmare chiamata")
         self.contacts_delete_btn = QPushButton("Elimina")
         self.contacts_add_btn.setObjectName("primaryActionButton")
         self.contacts_add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.contacts_edit_btn.setObjectName("clientFormSecondaryButton")
         self.contacts_edit_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.contacts_call_btn.setObjectName("clientFormSecondaryButton")
+        self.contacts_call_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.contacts_mail_btn.setObjectName("clientFormSecondaryButton")
+        self.contacts_mail_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.contacts_schedule_call_btn.setObjectName("clientFormSecondaryButton")
+        self.contacts_schedule_call_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.contacts_delete_btn.setObjectName("contactsDeleteButton")
         self.contacts_delete_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.contacts_edit_btn.setEnabled(False)
+        self.contacts_call_btn.setEnabled(False)
+        self.contacts_mail_btn.setEnabled(False)
+        self.contacts_schedule_call_btn.setEnabled(False)
         self.contacts_delete_btn.setEnabled(False)
+        self.contacts_call_btn.setToolTip("Apre l’app predefinita per chiamare il numero del contatto selezionato")
+        self.contacts_mail_btn.setToolTip("Apre il client di posta predefinito con l’indirizzo del contatto")
+        self.contacts_schedule_call_btn.setToolTip(
+            "Crea un impegno in agenda con titolo «Chiamare …» per il contatto selezionato"
+        )
         actions.addWidget(self.contacts_add_btn)
         actions.addWidget(self.contacts_edit_btn)
+        actions.addWidget(self.contacts_call_btn)
+        actions.addWidget(self.contacts_mail_btn)
+        actions.addWidget(self.contacts_schedule_call_btn)
         actions.addWidget(self.contacts_delete_btn)
         body_l.addWidget(action_bar)
 
@@ -1327,6 +1349,9 @@ class ClientsMixin:
 
         self.contacts_add_btn.clicked.connect(self._add_contact)
         self.contacts_edit_btn.clicked.connect(self._edit_contact)
+        self.contacts_call_btn.clicked.connect(self._contact_call)
+        self.contacts_mail_btn.clicked.connect(self._contact_mail)
+        self.contacts_schedule_call_btn.clicked.connect(self._schedule_contact_call_agenda)
         self.contacts_delete_btn.clicked.connect(self._delete_contact)
         return page
 
@@ -3665,6 +3690,15 @@ class ClientsMixin:
         has_selection = bool(self.contacts_table.selectedIndexes())
         self.contacts_edit_btn.setEnabled(has_selection)
         self.contacts_delete_btn.setEnabled(has_selection)
+        self.contacts_schedule_call_btn.setEnabled(has_selection)
+        contact = self._selected_contact() if has_selection else None
+        if contact:
+            phone_ok = bool((contact.get("phone") or "").strip() or (contact.get("mobile") or "").strip())
+            mail_ok = bool((contact.get("email") or "").strip())
+        else:
+            phone_ok = mail_ok = False
+        self.contacts_call_btn.setEnabled(bool(contact) and phone_ok)
+        self.contacts_mail_btn.setEnabled(bool(contact) and mail_ok)
     
 
     def _selected_contact(self) -> dict | None:
@@ -3686,6 +3720,114 @@ class ClientsMixin:
             "note": self.contacts_table.item(row, 5).text(),
         }
     
+
+    @staticmethod
+    def _sanitize_phone_for_dial(raw: str) -> str:
+        """Normalizza per schema tel: (cifre e + iniziale)."""
+        s = (raw or "").strip()
+        if not s:
+            return ""
+        out: list[str] = []
+        for i, c in enumerate(s):
+            if c.isdigit():
+                out.append(c)
+            elif c == "+" and i == 0:
+                out.append("+")
+            elif c in " \t\n\r.-/()":
+                continue
+        return "".join(out)
+
+    def _contact_call(self) -> None:
+        contact = self._selected_contact()
+        if contact is None:
+            QMessageBox.information(self, "Rubrica", "Seleziona un contatto.")
+            return
+        phone = (contact.get("phone") or "").strip()
+        mobile = (contact.get("mobile") or "").strip()
+        if not phone and not mobile:
+            QMessageBox.information(
+                self,
+                "Rubrica",
+                "Nessun numero di telefono o cellulare per questo contatto.",
+            )
+            return
+        if phone and mobile:
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Icon.Question)
+            box.setWindowTitle("Chiama")
+            box.setText("Quale numero vuoi usare?")
+            phone_btn = box.addButton("Telefono", QMessageBox.ButtonRole.ActionRole)
+            mobile_btn = box.addButton("Cellulare", QMessageBox.ButtonRole.ActionRole)
+            box.addButton(QMessageBox.StandardButton.Cancel)
+            box.setInformativeText(f"Telefono: {phone}\nCellulare: {mobile}")
+            box.exec()
+            clicked = box.clickedButton()
+            if clicked == phone_btn:
+                num = phone
+            elif clicked == mobile_btn:
+                num = mobile
+            else:
+                return
+        elif phone:
+            num = phone
+        else:
+            num = mobile
+        sanitized = self._sanitize_phone_for_dial(num)
+        if not sanitized:
+            QMessageBox.warning(
+                self,
+                "Rubrica",
+                "Il numero non contiene cifre utilizzabili per la chiamata.",
+            )
+            return
+        url = QUrl(f"tel:{sanitized}")
+        if not QDesktopServices.openUrl(url):
+            QMessageBox.warning(
+                self,
+                "Rubrica",
+                "Impossibile aprire l'applicazione predefinita per le chiamate.",
+            )
+
+    def _contact_mail(self) -> None:
+        contact = self._selected_contact()
+        if contact is None:
+            QMessageBox.information(self, "Rubrica", "Seleziona un contatto.")
+            return
+        email = (contact.get("email") or "").strip()
+        if not email:
+            QMessageBox.information(self, "Rubrica", "Nessun indirizzo e-mail per questo contatto.")
+            return
+        url = QUrl.fromUserInput(f"mailto:{email}")
+        if not url.isValid():
+            QMessageBox.warning(self, "Rubrica", "Indirizzo e-mail non valido.")
+            return
+        if not QDesktopServices.openUrl(url):
+            QMessageBox.warning(
+                self,
+                "Rubrica",
+                "Impossibile aprire il client di posta predefinito.",
+            )
+
+    def _schedule_contact_call_agenda(self) -> None:
+        contact = self._selected_contact()
+        if contact is None:
+            QMessageBox.information(self, "Contatti", "Seleziona un contatto.")
+            return
+        svc = getattr(self.repository, "settings", None)
+        if svc is None:
+            QMessageBox.warning(self, "Contatti", "Impostazioni agenda non disponibili.")
+            return
+        name = (contact.get("name") or "").strip() or "contatto"
+        dlg = AgendaItemDialog(self)
+        dlg.title_edit.setText(f"Chiamare {name}")
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        item = dlg.to_item()
+        items = [normalize_item(x) for x in svc.get_agenda_items()]
+        items.append(item)
+        svc.set_agenda_items(items)
+        if hasattr(self, "refresh_views"):
+            self.refresh_views()
 
     def _add_contact(self) -> None:
         client_id = getattr(self, "selected_client_id", None)

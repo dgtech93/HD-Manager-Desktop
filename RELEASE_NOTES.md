@@ -1,6 +1,26 @@
-# HD Manager Desktop - Release v1.0.5
+# HD Manager Desktop - Release v1.0.6
 
 Applicazione desktop per la gestione di clienti, prodotti, risorse, VPN e archivio documentale.
+
+---
+
+## Note di rilascio v1.0.6
+
+### Versione applicazione
+- Numero versione e data ultimo rilascio da `app/version.py` (anche nella finestra principale e in **Impostazioni → Informazione Prodotto**).
+- Allineamento: `installer.iss`, `scripts/build_release.ps1`, queste note.
+
+### Clienti — Rubrica
+- Pulsanti **Chiama** (handler predefinito `tel:`; se presenti telefono e cellulare, scelta del numero) e **Invia Mail** (`mailto:`).
+
+### Clienti — Contatti
+- Pulsante **Programmare chiamata**: apre il dialog nuovo impegno in agenda con titolo precompilato «Chiamare …» sul nome del contatto.
+
+### Impostazioni — Informazione Prodotto
+- Nuova voce di menu con versione, data ultimo rilascio, autore (Diego Giotta), indicazione «Progetto Indipendente» e contatto e-mail cliccabile.
+
+### Correzioni
+- Etichetta e-mail nella pagina Informazione Prodotto: uso corretto di `Qt.TextInteractionFlag` (PyQt6).
 
 ---
 
@@ -101,7 +121,7 @@ Applicazione desktop per la gestione di clienti, prodotti, risorse, VPN e archiv
 
 ## Installazione
 
-1. Scarica `HDManagerDesktop-Setup-1.0.5.exe` dalla release
+1. Scarica `HDManagerDesktop-Setup-1.0.6.exe` dalla release
 2. Esegui l'installer (richiesti privilegi amministratore)
 3. Segui la procedura guidata
 4. Opzionale: crea icona sul desktop

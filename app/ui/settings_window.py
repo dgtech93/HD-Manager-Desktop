@@ -1149,6 +1149,7 @@ class SettingsWindow(QWidget):
             ("Tag", self._build_tags_page()),
             ("Setup Strumenti", self._build_tools_setup_page()),
             ("Pacchetti", self._build_packages_page()),
+            ("Informazione Prodotto", self._build_product_info_page()),
         ]
 
         for index, (title, page) in enumerate(pages):
@@ -2574,6 +2575,69 @@ class SettingsWindow(QWidget):
         self._vpn_modify_cb = cb
         self._vpn_page_widget = page
         return page
+
+    def _build_product_info_page(self) -> QWidget:
+        from app.version import (
+            PRODUCT_AUTHOR,
+            PRODUCT_CONTACT_EMAIL,
+            PRODUCT_KIND,
+            __version__,
+            release_date_display_it,
+        )
+
+        widget = QWidget()
+        widget.setObjectName("toolsSetupPage")
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(16)
+
+        title = QLabel("Informazione Prodotto")
+        title.setObjectName("pageTitle")
+        title.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
+        layout.addWidget(title)
+
+        intro = QLabel(
+            "Informazioni sulla versione installata, sull’autore e su come contattarlo per segnalazioni o richieste."
+        )
+        intro.setWordWrap(True)
+        intro.setObjectName("toolsHelpBlock")
+        layout.addWidget(intro)
+
+        g_app = QGroupBox("Applicazione")
+        f_app = QFormLayout(g_app)
+        f_app.setSpacing(10)
+        f_app.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        f_app.addRow("Versione:", QLabel(__version__))
+        f_app.addRow("Data ultimo rilascio:", QLabel(release_date_display_it()))
+        layout.addWidget(g_app)
+
+        g_author = QGroupBox("Autore")
+        f_auth = QFormLayout(g_author)
+        f_auth.setSpacing(10)
+        f_auth.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        f_auth.addRow("Creatore:", QLabel(PRODUCT_AUTHOR))
+        f_auth.addRow("Tipo:", QLabel(PRODUCT_KIND))
+        layout.addWidget(g_author)
+
+        g_contact = QGroupBox("Contatti")
+        v_c = QVBoxLayout(g_contact)
+        v_c.setSpacing(8)
+        hint = QLabel(
+            "Per feedback, supporto o segnalazioni puoi scrivere all’indirizzo qui sotto."
+        )
+        hint.setWordWrap(True)
+        hint.setObjectName("toolsHelpBlock")
+        v_c.addWidget(hint)
+        mail_lbl = QLabel(
+            f'<a href="mailto:{PRODUCT_CONTACT_EMAIL}">{PRODUCT_CONTACT_EMAIL}</a>'
+        )
+        mail_lbl.setOpenExternalLinks(True)
+        mail_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+        v_c.addWidget(mail_lbl)
+        layout.addWidget(g_contact)
+
+        layout.addStretch(1)
+        return widget
 
     def _build_packages_page(self) -> QWidget:
         widget = QWidget()
