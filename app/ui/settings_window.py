@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from PyQt6.QtCore import QDate, QEvent, Qt, QThread, QTime, pyqtSignal
-from PyQt6.QtGui import QFont, QGuiApplication, QIcon, QKeySequence
+from PyQt6.QtGui import QCloseEvent, QFont, QGuiApplication, QIcon, QKeySequence
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -1144,6 +1144,13 @@ class SettingsWindow(QWidget):
 
         self._build_ui()
         self._apply_style()
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        """Evita distruzione della finestra mentre il thread VPN è ancora in esecuzione."""
+        w = self._vpn_worker
+        if w is not None and w.isRunning():
+            w.wait(8000)
+        super().closeEvent(event)
 
     def _build_ui(self) -> None:
         root = QHBoxLayout(self)

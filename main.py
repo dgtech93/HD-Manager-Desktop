@@ -1,5 +1,9 @@
 import sys
 
+from app.qt_runtime import apply_pyinstaller_qt_paths
+
+apply_pyinstaller_qt_paths()
+
 from pathlib import Path
 
 from PyQt6.QtCore import QMessageLogContext, QtMsgType, qInstallMessageHandler

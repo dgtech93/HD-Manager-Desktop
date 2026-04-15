@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "1.0.7"
+    [string]$Version = "1.0.8"
 )
 
 $ErrorActionPreference = "Stop"
@@ -42,6 +42,7 @@ if (Test-Path "$RootDir\dist\HDManagerDesktop") { Remove-Item "$RootDir\dist\HDM
 if (Test-Path "$RootDir\dist-installer") { Remove-Item "$RootDir\dist-installer" -Recurse -Force }
 
 Write-Host "==> PyInstaller (onedir)" -ForegroundColor Yellow
+# --collect-all PyQt6: include plugin piattaforma e DLL Qt (riduce crash Qt6Core su alcuni PC)
 python -m PyInstaller `
     --noconfirm `
     --clean `
@@ -50,6 +51,7 @@ python -m PyInstaller `
     --windowed `
     --icon "app\assets\image.ico" `
     --add-data "app\assets;app\assets" `
+    --collect-all PyQt6 `
     "main.py"
 if ($LASTEXITCODE -ne 0) {
     throw "PyInstaller terminato con errore (exit code: $LASTEXITCODE)."
