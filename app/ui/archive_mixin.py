@@ -96,6 +96,147 @@ class ArchiveMixin:
         if it is not None:
             it.setIcon(self._archive_icon_for_link(url))
 
+    def _archive_resolve_local_path(self, raw: str) -> str | None:
+        """Normalizza un percorso file/cartella locale (anche con schema file://)."""
+        s = (raw or "").strip()
+        if not s:
+            return None
+        if s.lower().startswith("file:"):
+            loc = QUrl(s).toLocalFile()
+            return loc if loc else None
+        q = QUrl.fromUserInput(s)
+        if q.isLocalFile():
+            loc = q.toLocalFile()
+            if loc:
+                return loc
+        try:
+            return os.path.abspath(os.path.expandvars(os.path.expanduser(s)))
+        except (OSError, ValueError):
+            return None
+
+    def _archive_directory_for_local_file_path(self, raw: str) -> str | None:
+        """Cartella che contiene un file locale, o la cartella stessa se `raw` è una directory."""
+        path = self._archive_resolve_local_path(raw)
+        if not path:
+            return None
+        if os.path.isfile(path):
+            parent = os.path.dirname(path)
+            return parent if os.path.isdir(parent) else None
+        if os.path.isdir(path):
+            return path
+        parent = os.path.dirname(path)
+        return parent if os.path.isdir(parent) else None
+
+    def _archive_directory_for_link_url(self, raw: str) -> str | None:
+        """Solo per URL non http(s)/mailto che puntano a risorse locali."""
+        s = (raw or "").strip()
+        if not s:
+            return None
+        low = s.lower()
+        if low.startswith(("http://", "https://", "mailto:")):
+            return None
+        return self._archive_directory_for_local_file_path(s)
+
+    def _archive_open_explorer_directory(self, directory: str) -> None:
+        d = (directory or "").strip()
+        if not d:
+            return
+        try:
+            d = os.path.normpath(os.path.abspath(d))
+        except (OSError, ValueError):
+            QMessageBox.warning(self, "Archivio", "Percorso cartella non valido.")
+            return
+        if not os.path.isdir(d):
+            QMessageBox.warning(
+                self,
+                "Archivio",
+                "Cartella non trovata o non accessibile.",
+            )
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(d))
+
+    def _archive_action_open_folder_for_file_path(self, raw: str) -> None:
+        folder = self._archive_directory_for_local_file_path(raw)
+        if not folder:
+            QMessageBox.information(
+                self,
+                "Archivio",
+                "Seleziona un file con un percorso valido sul disco, oppure il file non è più presente.",
+            )
+            return
+        self._archive_open_explorer_directory(folder)
+
+    def _archive_action_open_folder_for_url(self, raw: str) -> None:
+        folder = self._archive_directory_for_link_url(raw)
+        if not folder:
+            QMessageBox.information(
+                self,
+                "Archivio",
+                "Apri cartella è disponibile per link che puntano a file o cartelle sul computer "
+                "(percorso locale o file://). Per indirizzi http/https usa «Apri link».",
+            )
+            return
+        self._archive_open_explorer_directory(folder)
+
+    def _archive_open_folder_overview_file(self) -> None:
+        if not hasattr(self, "archive_files_table"):
+            return
+        selected = self.archive_files_table.selectedIndexes()
+        if not selected:
+            QMessageBox.information(self, "Archivio", "Seleziona un file nella tabella.")
+            return
+        row = selected[0].row()
+        path_it = self.archive_files_table.item(row, 5)
+        path = path_it.text().strip() if path_it else ""
+        self._archive_action_open_folder_for_file_path(path)
+
+    def _archive_open_folder_overview_link(self) -> None:
+        link = self._selected_link_row()
+        if link is None:
+            QMessageBox.information(self, "Archivio", "Seleziona un link nella tabella.")
+            return
+        self._archive_action_open_folder_for_url(str(link.get("url") or ""))
+
+    def _archive_open_folder_tag_view(self) -> None:
+        if not hasattr(self, "tags_files_table"):
+            return
+        rows_f = sorted({i.row() for i in self.tags_files_table.selectedIndexes()})
+        if rows_f:
+            path_it = self.tags_files_table.item(rows_f[0], 1)
+            path = path_it.text().strip() if path_it else ""
+            self._archive_action_open_folder_for_file_path(path)
+            return
+        rows_l = sorted({i.row() for i in self.tags_links_table.selectedIndexes()})
+        if rows_l:
+            url_it = self.tags_links_table.item(rows_l[0], 1)
+            url = url_it.text().strip() if url_it else ""
+            self._archive_action_open_folder_for_url(url)
+            return
+        QMessageBox.information(
+            self,
+            "Archivio",
+            "Seleziona un file o un link nelle tabelle a destra.",
+        )
+
+    def _archive_open_folder_favorites(self) -> None:
+        rows_f = sorted({i.row() for i in self.favorites_table.selectedIndexes()})
+        if rows_f:
+            path_it = self.favorites_table.item(rows_f[0], 1)
+            path = path_it.text().strip() if path_it else ""
+            self._archive_action_open_folder_for_file_path(path)
+            return
+        rows_l = sorted({i.row() for i in self.favorites_links_table.selectedIndexes()})
+        if rows_l:
+            url_it = self.favorites_links_table.item(rows_l[0], 1)
+            url = url_it.text().strip() if url_it else ""
+            self._archive_action_open_folder_for_url(url)
+            return
+        QMessageBox.information(
+            self,
+            "Archivio",
+            "Seleziona un file o un link preferito.",
+        )
+
     @staticmethod
     def _archive_style_table_icons(table: QTableWidget) -> None:
         table.setIconSize(QSize(20, 20))
@@ -157,6 +298,17 @@ class ArchiveMixin:
         self.favorites_hint_lbl.setWordWrap(True)
         body_l.addWidget(self.favorites_hint_lbl)
 
+        fav_folder_row = QHBoxLayout()
+        fav_folder_row.addStretch(1)
+        self.favorites_open_folder_btn = QPushButton("Apri cartella")
+        self.favorites_open_folder_btn.setObjectName("archiveActionButton")
+        self.favorites_open_folder_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.favorites_open_folder_btn.setToolTip(
+            "Apre la cartella del file o del percorso locale del link selezionato"
+        )
+        fav_folder_row.addWidget(self.favorites_open_folder_btn)
+        body_l.addLayout(fav_folder_row)
+
         lf = QLabel("File")
         lf.setObjectName("subText")
         body_l.addWidget(lf)
@@ -211,6 +363,8 @@ class ArchiveMixin:
         ltl.addWidget(self.favorites_links_table, 1)
         body_l.addWidget(ltw, 1)
 
+        self.favorites_open_folder_btn.clicked.connect(self._archive_open_folder_favorites)
+
         card_l.addWidget(body, 1)
         layout.addWidget(card, 1)
         return page
@@ -244,6 +398,17 @@ class ArchiveMixin:
         hint.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         hint.setWordWrap(True)
         body_l.addWidget(hint)
+
+        tags_folder_row = QHBoxLayout()
+        tags_folder_row.addStretch(1)
+        self.tags_open_folder_btn = QPushButton("Apri cartella")
+        self.tags_open_folder_btn.setObjectName("archiveActionButton")
+        self.tags_open_folder_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.tags_open_folder_btn.setToolTip(
+            "Apre la cartella del file o del percorso locale del link selezionato (tabelle a destra)"
+        )
+        tags_folder_row.addWidget(self.tags_open_folder_btn)
+        body_l.addLayout(tags_folder_row)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setChildrenCollapsible(False)
@@ -338,6 +503,8 @@ class ArchiveMixin:
         splitter.setSizes([280, 780])
         body_l.addWidget(splitter, 1)
 
+        self.tags_open_folder_btn.clicked.connect(self._archive_open_folder_tag_view)
+
         card_l.addWidget(body, 1)
         outer.addWidget(card, 1)
         return page
@@ -426,6 +593,7 @@ class ArchiveMixin:
         self.archive_add_file_btn = QPushButton("Aggiungi file")
         self.archive_delete_file_btn = QPushButton("Elimina file")
         self.archive_refresh_btn = QPushButton("Aggiorna")
+        self.archive_open_folder_file_btn = QPushButton("Apri cartella")
 
         for btn in (
             self.archive_new_folder_btn,
@@ -439,6 +607,12 @@ class ArchiveMixin:
         self.archive_delete_file_btn.setObjectName("dangerActionButton")
         self.archive_delete_file_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         toolbar.addWidget(self.archive_delete_file_btn)
+        self.archive_open_folder_file_btn.setObjectName("archiveActionButton")
+        self.archive_open_folder_file_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.archive_open_folder_file_btn.setToolTip(
+            "Apre in Esplora risorse la cartella che contiene il file selezionato"
+        )
+        toolbar.addWidget(self.archive_open_folder_file_btn)
         toolbar.addStretch()
         layout.addWidget(toolbar_wrap)
 
@@ -505,6 +679,7 @@ class ArchiveMixin:
         self.archive_add_file_btn.clicked.connect(self._add_archive_files)
         self.archive_delete_file_btn.clicked.connect(self._delete_selected_archive_file)
         self.archive_refresh_btn.clicked.connect(self._render_archive_overview)
+        self.archive_open_folder_file_btn.clicked.connect(self._archive_open_folder_overview_file)
         self.archive_filter_ext.currentTextChanged.connect(self._render_archive_files)
         self.archive_filter_name.textChanged.connect(self._render_archive_files)
         clear_btn.clicked.connect(self._clear_archive_filters)
@@ -526,6 +701,7 @@ class ArchiveMixin:
         self.archive_edit_link_btn = QPushButton("Modifica")
         self.archive_delete_link_btn = QPushButton("Elimina")
         self.archive_open_link_btn = QPushButton("Apri link")
+        self.archive_open_folder_link_btn = QPushButton("Apri cartella")
 
         for btn in (
             self.archive_new_link_btn,
@@ -538,6 +714,12 @@ class ArchiveMixin:
         self.archive_delete_link_btn.setObjectName("dangerActionButton")
         self.archive_delete_link_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         toolbar.addWidget(self.archive_delete_link_btn)
+        self.archive_open_folder_link_btn.setObjectName("archiveActionButton")
+        self.archive_open_folder_link_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.archive_open_folder_link_btn.setToolTip(
+            "Apre la cartella se il link punta a un file o cartella locale (non per http/https)"
+        )
+        toolbar.addWidget(self.archive_open_folder_link_btn)
         toolbar.addStretch()
         layout.addWidget(toolbar_wrap)
 
@@ -591,6 +773,7 @@ class ArchiveMixin:
         self.archive_edit_link_btn.clicked.connect(self._edit_selected_link)
         self.archive_delete_link_btn.clicked.connect(self._delete_selected_link)
         self.archive_open_link_btn.clicked.connect(self._open_selected_link)
+        self.archive_open_folder_link_btn.clicked.connect(self._archive_open_folder_overview_link)
         self.archive_link_filter_tag.currentTextChanged.connect(self._render_archive_links)
         self.archive_link_filter_name.textChanged.connect(self._render_archive_links)
         clear_btn.clicked.connect(self._clear_archive_link_filters)

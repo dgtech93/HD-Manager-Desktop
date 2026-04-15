@@ -32,5 +32,5 @@ class AppController:
     def start(self, qt_app: QApplication) -> None:
         self.db.init_db()
         self._main_window = MainWindow(controller=self.main_controller)
-        self._main_window.show()
+        self._main_window.showMaximized()
 

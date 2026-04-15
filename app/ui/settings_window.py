@@ -37,6 +37,7 @@ from PyQt6.QtWidgets import (
     QFileDialog,
     QScrollArea,
     QSpinBox,
+    QStyleOptionViewItem,
 )
 
 from app.db_export import (
@@ -482,13 +483,26 @@ class ComboBoxDelegate(QStyledItemDelegate):
     def createEditor(self, parent, option, index):
         col_cfg = self.page.columns[index.column()]
         if col_cfg.editor != "combo":
-            return super().createEditor(parent, option, index)
+            editor = super().createEditor(parent, option, index)
+            if isinstance(editor, QLineEdit):
+                editor.setMinimumHeight(30)
+            return editor
 
         combo = QComboBox(parent)
         combo.addItem("")
         combo.addItems(self.page.column_options.get(index.column(), []))
         combo.setEditable(False)
+        combo.setMinimumHeight(30)
         return combo
+
+    def updateEditorGeometry(self, editor, option, index) -> None:
+        """Evita editor troppo bassi rispetto al font (testo tagliato in basso)."""
+        table = self.page.table
+        row_h = table.rowHeight(index.row()) if index.isValid() else option.rect.height()
+        opt = QStyleOptionViewItem(option)
+        min_h = max(32, row_h - 2)
+        opt.rect.setHeight(min_h)
+        super().updateEditorGeometry(editor, opt, index)
 
     def setEditorData(self, editor, index):
         if isinstance(editor, QComboBox):
@@ -640,6 +654,7 @@ class EditableTablePage(QWidget):
             if not col.visible:
                 self.table.setColumnHidden(idx, True)
         self.table.setItemDelegate(ComboBoxDelegate(self, self.table))
+        self.table.verticalHeader().setDefaultSectionSize(34)
         self.table.installEventFilter(self)
         if self.use_catalog_styling:
             self.table.setObjectName("settingsCatalogDataTable")
@@ -703,6 +718,10 @@ class EditableTablePage(QWidget):
         self.quick_insert_mode = False
         self._update_help()
         self.status_lbl.setText(f"Righe: {len(rows)}")
+
+    def refresh_lookup_options_only(self) -> None:
+        """Aggiorna solo elenchi combo senza ricaricare le righe (evita perdita modifiche in bozza)."""
+        self._refresh_lookup_options()
 
     def _append_row(self, row_data: dict) -> None:
         row = self.table.rowCount()
@@ -1164,6 +1183,18 @@ class SettingsWindow(QWidget):
         self.menu.setCurrentRow(0)
         self._refresh_windows_vpn_async()
 
+    def _safe_refresh_editable_page(self, page: EditableTablePage | None) -> None:
+        """Ricarica dalla tabella solo se non è in corso una modifica (altrimenti si perdono le bozze)."""
+        if page is None or page.edit_mode:
+            return
+        page.refresh_page()
+
+    def _safe_refresh_editable_pages(self, pages: list[EditableTablePage]) -> None:
+        if any(p.edit_mode for p in pages):
+            return
+        for p in pages:
+            p.refresh_page()
+
     def _show_page(self, index: int) -> None:
         self.stack.setCurrentIndex(index)
         current = self.stack.currentWidget()
@@ -1171,35 +1202,30 @@ class SettingsWindow(QWidget):
             self._catalog_page_widget is not None
             and current is self._catalog_page_widget
         ):
-            self._catalog_env_page.refresh_page()
-            self._catalog_rel_page.refresh_page()
-            self._catalog_pt_page.refresh_page()
-            self._catalog_prod_page.refresh_page()
+            self._safe_refresh_editable_pages(self._catalog_table_pages())
         elif (
             self._rr_page_widget is not None
             and current is self._rr_page_widget
         ):
-            self._rr_comp_page.refresh_page()
-            self._rr_roles_page.refresh_page()
-            self._rr_res_page.refresh_page()
+            self._safe_refresh_editable_pages(self._rr_table_pages())
         elif (
             self._tag_page_widget is not None
             and current is self._tag_page_widget
             and self._tag_table_page is not None
         ):
-            self._tag_table_page.refresh_page()
+            self._safe_refresh_editable_page(self._tag_table_page)
         elif (
             self._clients_page_widget is not None
             and current is self._clients_page_widget
             and self._clients_table_page is not None
         ):
-            self._clients_table_page.refresh_page()
+            self._safe_refresh_editable_page(self._clients_table_page)
         elif (
             self._vpn_page_widget is not None
             and current is self._vpn_page_widget
             and self._vpn_table_page is not None
         ):
-            self._vpn_table_page.refresh_page()
+            self._safe_refresh_editable_page(self._vpn_table_page)
         if self._tools_setup_index is not None and index == self._tools_setup_index:
             self._load_tools_setup_page()
         if self._vpn_page_index is not None and index == self._vpn_page_index:
@@ -2814,7 +2840,12 @@ class SettingsWindow(QWidget):
 
     def _on_windows_vpn_loaded(self, names: list[str]) -> None:
         self._windows_vpn_names = names
-        if self._vpn_table_page is not None:
+        if self._vpn_table_page is None:
+            return
+        # refresh_page() ricaricherebbe dal DB e cancellerebbe modifiche non salvate in VPN
+        if self._vpn_table_page.edit_mode:
+            self._vpn_table_page.refresh_lookup_options_only()
+        else:
             self._vpn_table_page.refresh_page()
 
     def _apply_style(self) -> None:
@@ -2935,6 +2966,22 @@ class SettingsWindow(QWidget):
                 gridline-color: #e7edf3;
                 selection-background-color: #2563eb;
                 selection-color: #ffffff;
+            }
+            QTableWidget::item {
+                padding: 4px 8px;
+            }
+            QTableWidget QLineEdit,
+            QTableWidget QComboBox {
+                min-height: 28px;
+                padding: 4px 8px;
+            }
+            #contentStack QLineEdit,
+            #contentStack QComboBox,
+            #contentStack QSpinBox,
+            #contentStack QTimeEdit,
+            #contentStack QDateEdit {
+                min-height: 28px;
+                padding: 5px 10px;
             }
             QHeaderView::section {
                 background: #0f172a;

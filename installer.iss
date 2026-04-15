@@ -17,7 +17,7 @@
   #define AppName "HD Manager Desktop"
 #endif
 #ifndef AppVersion
-  #define AppVersion "1.0.6"
+  #define AppVersion "1.0.7"
 #endif
 #ifndef AppPublisher
   #define AppPublisher "HD Manager"

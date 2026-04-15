@@ -1,6 +1,25 @@
-# HD Manager Desktop - Release v1.0.6
+# HD Manager Desktop - Release v1.0.7
 
 Applicazione desktop per la gestione di clienti, prodotti, risorse, VPN e archivio documentale.
+
+---
+
+## Note di rilascio v1.0.7
+
+### Versione applicazione
+- Versione **1.0.7**, data ultimo rilascio **28 marzo 2026** (da `app/version.py`: finestra principale, **Impostazioni → Informazione Prodotto**).
+- Allineamento: `installer.iss`, `scripts/build_release.ps1`, queste note.
+
+### Avvio
+- Finestra principale avviata **massimizzata** (area di lavoro).
+
+### Archivio
+- Pulsante **Apri cartella** nelle viste **Archivio** (schede File e Link), **Tag** e **Preferiti**: apre Esplora file sulla cartella del file selezionato (per link, solo percorsi locali / `file://`).
+
+### Impostazioni
+- **Tabelle**: editor e righe più alti, padding e stili per evitare testo tagliato in **QLineEdit** / **QComboBox** nelle celle.
+- **Nessun refresh distruttivo** mentre una pagina è in **Modifica** (cambio voce di menu non ricarica dal DB se ci sono bozze).
+- Completamento lista **VPN Windows** in background: in modalità modifica VPN non viene più eseguito un refresh completo che cancellava modifiche non salvate; aggiornati solo gli elenchi dei combo quando serve.
 
 ---
 
@@ -121,7 +140,7 @@ Applicazione desktop per la gestione di clienti, prodotti, risorse, VPN e archiv
 
 ## Installazione
 
-1. Scarica `HDManagerDesktop-Setup-1.0.6.exe` dalla release
+1. Scarica `HDManagerDesktop-Setup-1.0.7.exe` dalla release
 2. Esegui l'installer (richiesti privilegi amministratore)
 3. Segui la procedura guidata
 4. Opzionale: crea icona sul desktop

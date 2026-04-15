@@ -2,9 +2,9 @@
 
 from datetime import date
 
-__version__ = "1.0.6"
+__version__ = "1.0.7"
 # Data dell’ultimo rilascio pubblicato (ISO YYYY-MM-DD); aggiornare a ogni release.
-__release_date__ = "2026-03-27"
+__release_date__ = "2026-03-28"
 
 PRODUCT_AUTHOR = "Diego Giotta"
 PRODUCT_KIND = "Progetto Indipendente"
